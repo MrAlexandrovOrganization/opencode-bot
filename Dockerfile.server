@@ -1,0 +1,85 @@
+# opencode server — standalone opencode binary from GitHub Releases.
+# There is no official public image, so we download the release build.
+FROM ubuntu:24.04 AS download
+
+ARG OPENCODE_TARGET=linux-x64
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN url="https://github.com/anomalyco/opencode/releases/latest/download/opencode-${OPENCODE_TARGET}.tar.gz" \
+    && curl -fsSL -o /tmp/opencode.tar.gz "$url" \
+    && tar -xzf /tmp/opencode.tar.gz -C /usr/local/bin opencode \
+    && chmod +x /usr/local/bin/opencode \
+    && /usr/local/bin/opencode --version
+
+FROM ubuntu:24.04
+
+ARG GO_VERSION=1.26.6
+
+# Dev toolchain: make/gcc (build-essential), Python 3 + pip + poetry, jq for
+# JSON, envsubst for the observability Makefiles, git+curl.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates curl git jq gettext-base \
+        build-essential make \
+        python3 python3-pip python3-venv \
+    && rm -rf /var/lib/apt/lists/* \
+    # PEP 668 (externally-managed-environment) blocks plain `pip install`;
+    # --break-system-packages installs poetry to /usr/local/bin for everyone.
+    && pip3 install --no-cache-dir --break-system-packages poetry
+
+# Go toolchain. apt's golang-go on 24.04 is Go 1.22 — too old for the projects
+# here (notes-bot, ollama-bot, location need go >= 1.26), so install the
+# official build.
+RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" -o /tmp/go.tgz \
+    && tar -C /usr/local -xzf /tmp/go.tgz \
+    && rm /tmp/go.tgz
+
+# Dev tools the project Makefiles expect, baked into the image so they survive
+# container recreation: buf + Go protoc plugins, templ, goose, golangci-lint,
+# grpcurl.
+ENV GOPATH=/go \
+    GOBIN=/usr/local/bin \
+    GOCACHE=/tmp/gocache \
+    GOMODCACHE=/go/pkg/mod
+RUN set -eux; \
+    /usr/local/go/bin/go install github.com/bufbuild/buf/cmd/buf@v1.67.0; \
+    /usr/local/go/bin/go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11; \
+    /usr/local/go/bin/go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.1; \
+    /usr/local/go/bin/go install github.com/a-h/templ/cmd/templ@v0.3.1020; \
+    /usr/local/go/bin/go install github.com/pressly/goose/v3/cmd/goose@latest; \
+    /usr/local/go/bin/go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest; \
+    /usr/local/go/bin/go install github.com/fullstorydev/grpcurl/cmd/grpcurl@v1.9.1; \
+    rm -rf /go /tmp/gocache
+
+COPY --from=download /usr/local/bin/opencode /usr/local/bin/opencode
+# Entrypoint that sets git identity from GIT_USER_NAME / GIT_USER_EMAIL env.
+COPY scripts/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+# Persisted opencode state lives in these XDG dirs (bind-mounted from the host
+# in docker-compose.yml). /workspace is the project root the agent operates on.
+ENV OPENCODE_DISABLE_AUTOUPDATE=1 \
+    XDG_CONFIG_HOME=/mnt/config \
+    XDG_DATA_HOME=/mnt/data \
+    XDG_CACHE_HOME=/mnt/cache \
+    PATH="/usr/local/go/bin:/home/ubuntu/go/bin:${PATH}"
+
+# Go build/module caches land in the persistent /mnt/cache bind mount so
+# repeated builds and tests survive container restarts. Tools the agent
+# installs with `go install` go to /home/ubuntu/go/bin (ephemeral).
+ENV GOPATH=/home/ubuntu/go \
+    GOBIN=/home/ubuntu/go/bin \
+    GOCACHE=/mnt/cache/go/build \
+    GOMODCACHE=/mnt/cache/go/pkg/mod
+
+# Run as the image's default `ubuntu` user (UID 1000), matching the host user
+# (maxim) so bind-mounted host files keep their original ownership.
+USER ubuntu
+WORKDIR /workspace
+
+EXPOSE 4096
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD ["serve", "--hostname", "0.0.0.0", "--port", "4096"]

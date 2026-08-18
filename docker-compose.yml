@@ -1,0 +1,75 @@
+services:
+  opencode-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    restart: unless-stopped
+    environment:
+      # Protect the server with HTTP basic auth. The bot sends the same
+      # OPENCODE_USERNAME / OPENCODE_PASSWORD credentials from .env.
+      OPENCODE_SERVER_USERNAME: ${OPENCODE_USERNAME:-opencode}
+      OPENCODE_SERVER_PASSWORD: ${OPENCODE_PASSWORD:-}
+      # Git identity for the agent (git commit), from .env.
+      GIT_USER_NAME: ${GIT_USER_NAME:-}
+      GIT_USER_EMAIL: ${GIT_USER_EMAIL:-}
+    volumes:
+      # Read-only access to the whole home directory ("читай почти всё").
+      - /home/maxim:/home/maxim:ro
+      # Writable project root — the only place the agent may edit files.
+      # Overrides the read-only /home/maxim mount for this subtree.
+      - /home/maxim/projects:/workspace
+      # Reuse the host opencode state (config, plugins, DB, provider auth).
+      - /home/maxim/.config/opencode:/mnt/config
+      - /home/maxim/.local/share/opencode:/mnt/data
+      - /home/maxim/.cache/opencode:/mnt/cache
+    networks:
+      - whisper-net
+    extends:
+      file: docker-compose.base.yml
+      service: base
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+          cpus: "1"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-u", "${OPENCODE_USERNAME:-opencode}:${OPENCODE_PASSWORD:-}", "http://localhost:4096/global/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  opencode-bot:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      opencode-server:
+        condition: service_healthy
+    environment:
+      # opencode server runs as the opencode-server service on the same network.
+      OPENCODE_BASE_URL: http://opencode-server:4096
+      OPENCODE_USERNAME: ${OPENCODE_USERNAME:-opencode}
+      OPENCODE_PASSWORD: ${OPENCODE_PASSWORD:-}
+      OPENCODE_MODEL: ${OPENCODE_MODEL:-}
+      OPENCODE_AGENT: ${OPENCODE_AGENT:-build}
+      PERMISSION_MODE: ${PERMISSION_MODE:-ask}
+      OPENCODE_REQUEST_TIMEOUT: ${OPENCODE_REQUEST_TIMEOUT:-30m}
+      # Shared local Telegram Bot API server (infra/telegram-bot-api).
+      TELEGRAM_LOCAL_API_URL: http://telegram-bot-api:8081
+      # Shared Whisper gRPC service (backends/transcriber)
+      WHISPER_GRPC_HOST: whisper-ingress
+      WHISPER_GRPC_PORT: "50053"
+    networks:
+      - telegram-net
+      - whisper-net
+    extends:
+      file: docker-compose.base.yml
+      service: base
+
+networks:
+  telegram-net:
+    external: true
+  whisper-net:
+    external: true
+    name: whisper-net

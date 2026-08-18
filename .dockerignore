@@ -1,0 +1,30 @@
+# Git
+.git
+.gitignore
+.github
+
+# Env
+.env
+.env.example
+
+# Docs
+*.md
+
+# IDE / editor
+.vscode
+.idea
+*.swp
+*.swo
+
+# Test artifacts
+coverage.out
+*.out
+/tmp/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+docker-compose*.yml
+Dockerfile
