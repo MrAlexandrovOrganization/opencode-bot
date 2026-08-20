@@ -40,6 +40,14 @@ func (b *Bot) handleUpdate(update telego.Update) {
 		b.handleDocument(msg)
 	case msg.Voice != nil || msg.VideoNote != nil:
 		b.handleVoice(msg)
+	case msg.Animation != nil:
+		b.handleAnimation(msg)
+	case msg.Audio != nil:
+		b.handleAudio(msg)
+	case msg.Video != nil:
+		b.handleVideo(msg)
+	case msg.Sticker != nil:
+		b.handleSticker(msg)
 	case msg.Text != "":
 		cmd, _, _ := tu.ParseCommand(msg.Text)
 		if cmd != "" {
