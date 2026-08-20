@@ -96,7 +96,6 @@ func (b *Bot) handleCallback(query *telego.CallbackQuery) {
 
 	b.mu.Lock()
 	_, ok := b.perms[permissionID]
-	delete(b.perms, permissionID)
 	b.mu.Unlock()
 	if !ok {
 		_ = b.api.AnswerCallbackQuery(context.Background(), &telego.AnswerCallbackQueryParams{
@@ -116,6 +115,12 @@ func (b *Bot) handleCallback(query *telego.CallbackQuery) {
 	if err != nil {
 		slog.Error("reply permission", "error", err)
 		label = "❌ Ошибка: " + err.Error()
+	} else {
+		// Снимаем запрос только после успешного ответа, иначе пользователь
+		// сможет повторить нажатие после восстановления сервера.
+		b.mu.Lock()
+		delete(b.perms, permissionID)
+		b.mu.Unlock()
 	}
 
 	_ = b.api.AnswerCallbackQuery(context.Background(), &telego.AnswerCallbackQueryParams{

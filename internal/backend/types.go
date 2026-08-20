@@ -79,6 +79,7 @@ type Question struct {
 	Question string           `json:"question"`
 	Header   string           `json:"header"`
 	Options  []QuestionOption `json:"options"`
+	Custom   *bool            `json:"custom"` // false = без «своего ответа»
 }
 
 // QuestionAsked — серия вопросов, ждущих ответа пользователя.

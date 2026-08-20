@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"context"
 	"log/slog"
 
 	"github.com/mymmrac/telego"
@@ -9,6 +10,15 @@ import (
 
 func (b *Bot) handleUpdate(update telego.Update) {
 	if update.CallbackQuery != nil {
+		// Кнопки (вопросы/разрешения) доступны только авторизованному
+		// пользователю, как и обычные сообщения.
+		if update.CallbackQuery.From.ID != b.cfg.RootID {
+			_ = b.api.AnswerCallbackQuery(context.Background(), &telego.AnswerCallbackQueryParams{
+				CallbackQueryID: update.CallbackQuery.ID,
+				Text:            "Доступ запрещён",
+			})
+			return
+		}
 		b.handleCallback(update.CallbackQuery)
 		return
 	}

@@ -74,17 +74,21 @@ func (b *Bot) askCurrentQuestion() {
 	sb.WriteString(escapeHTML(q.Question))
 	sb.WriteString("</blockquote>")
 
+	// Кнопки привязываем к requestID вопроса: нажатие кнопки старого
+	// сообщения не должно отвечать на текущий вопрос.
 	var rows [][]telego.InlineKeyboardButton
 	for oi := range q.Options {
 		rows = append(rows, []telego.InlineKeyboardButton{{
 			Text:         shortLine(q.Options[oi].Label, 100),
-			CallbackData: fmt.Sprintf("qans:%d:%d", p.idx, oi),
+			CallbackData: fmt.Sprintf("qans:%s:%d:%d", p.requestID, p.idx, oi),
 		}})
 	}
-	rows = append(rows, []telego.InlineKeyboardButton{{
-		Text:         "✍️ Свой ответ",
-		CallbackData: fmt.Sprintf("qans:%d:-1", p.idx),
-	}})
+	if q.Custom == nil || *q.Custom {
+		rows = append(rows, []telego.InlineKeyboardButton{{
+			Text:         "✍️ Свой ответ",
+			CallbackData: fmt.Sprintf("qans:%s:%d:-1", p.requestID, p.idx),
+		}})
+	}
 	kb := telego.InlineKeyboardMarkup{InlineKeyboard: rows}
 
 	msg, err := b.api.SendMessage(context.Background(),
@@ -92,6 +96,14 @@ func (b *Bot) askCurrentQuestion() {
 	)
 	if err != nil {
 		slog.Error("send question", "error", err)
+		// Не бросаем пользователя в молчании: вопрос не показался, снимаем
+		// его из pending — иначе следующий текст будет съеден как «ответ».
+		b.mu.Lock()
+		if b.pendingQ == p {
+			b.pendingQ = nil
+		}
+		b.mu.Unlock()
+		b.send(chatID, "❌ Не удалось показать вопрос: "+err.Error())
 		return
 	}
 	b.mu.Lock()
@@ -144,24 +156,27 @@ func (b *Bot) submitQuestionReply(p *pendingQuestions) {
 // handleQuestionAnswer processes an inline button click on a question prompt.
 func (b *Bot) handleQuestionAnswer(query *telego.CallbackQuery) {
 	parts := strings.Split(query.Data, ":")
-	if len(parts) != 3 {
+	if len(parts) != 4 || parts[0] != "qans" {
+		_ = b.api.AnswerCallbackQuery(context.Background(), &telego.AnswerCallbackQueryParams{
+			CallbackQueryID: query.ID,
+			Text:            "Сообщение устарело",
+		})
 		return
 	}
-	qidx, errQ := strconv.Atoi(parts[1])
-	oidx, errO := strconv.Atoi(parts[2])
+	requestID := parts[1]
+	qidx, errQ := strconv.Atoi(parts[2])
+	oidx, errO := strconv.Atoi(parts[3])
 	if errQ != nil || errO != nil {
 		return
 	}
 
 	b.mu.Lock()
 	p := b.pendingQ
-	var label string
-	if p != nil && p.idx == qidx && oidx >= 0 && oidx < len(p.questions[qidx].Options) {
-		label = p.questions[qidx].Options[oidx].Label
-	}
 	b.mu.Unlock()
 
-	if p == nil || p.idx != qidx {
+	// Кнопка относится к старому вопросу (другой requestID) или уже
+	// обработанному шагу серии — отклоняем, не трогая текущее состояние.
+	if p == nil || p.requestID != requestID || p.idx != qidx {
 		_ = b.api.AnswerCallbackQuery(context.Background(), &telego.AnswerCallbackQueryParams{
 			CallbackQueryID: query.ID,
 			Text:            "Вопрос уже обработан",
@@ -175,9 +190,14 @@ func (b *Bot) handleQuestionAnswer(query *telego.CallbackQuery) {
 		})
 		return
 	}
-	if label == "" {
+	if oidx < 0 || oidx >= len(p.questions[qidx].Options) {
+		_ = b.api.AnswerCallbackQuery(context.Background(), &telego.AnswerCallbackQueryParams{
+			CallbackQueryID: query.ID,
+			Text:            "Вариант недоступен",
+		})
 		return
 	}
+	label := p.questions[qidx].Options[oidx].Label
 	_ = b.api.AnswerCallbackQuery(context.Background(), &telego.AnswerCallbackQueryParams{
 		CallbackQueryID: query.ID,
 		Text:            "✅ " + label,

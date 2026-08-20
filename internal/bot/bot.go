@@ -348,12 +348,16 @@ func toolStatus(tool string, state toolPartState) string {
 	return "⚙️ " + shortLine(toolDesc(tool, state), 60)
 }
 
-// shortLine truncates a line to at most n bytes, adding "..." when cut.
+// shortLine truncates a line to at most n runes, adding "..." when cut.
 func shortLine(s string, n int) string {
-	if len(s) <= n {
+	r := []rune(s)
+	if len(r) <= n {
 		return s
 	}
-	return s[:n-3] + "..."
+	if n <= 3 {
+		return string(r[:n])
+	}
+	return string(r[:n-3]) + "..."
 }
 
 func (b *Bot) currentSessionID() string {
@@ -425,6 +429,13 @@ func (b *Bot) finishStream(st *Stream, info backend.Message, errText string) {
 		}
 		b.endStream()
 		b.release()
+		// Запрос завершён (в т.ч. по таймауту/ошибке): любые висящие вопрос
+		// и запросы разрешений устарели, чтобы не съедать следующее
+		// сообщение пользователя как «ответ» на мёртвый вопрос.
+		b.mu.Lock()
+		b.pendingQ = nil
+		b.perms = make(map[string]*permAsk)
+		b.mu.Unlock()
 	})
 }
 

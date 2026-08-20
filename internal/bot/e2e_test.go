@@ -144,6 +144,7 @@ type fakeBackend struct {
 	mu     sync.Mutex
 	gotMsg []backend.MessageRequest // принятые send-message запросы
 	stored map[string]string        // messageID -> тело StoredMessage (JSON)
+	replQ  [][][]string             // принятые answers на вопрос
 
 	pushCh  chan []byte
 	wsReady chan struct{}
@@ -162,6 +163,7 @@ func newFakeBackend(t *testing.T) *fakeBackend {
 	mux.HandleFunc("POST /api/v1/sessions/"+testSessID+"/messages", fb.handleSendMessage)
 	mux.HandleFunc("GET /api/v1/sessions/"+testSessID+"/messages/asm1", fb.handleGetMessage)
 	mux.HandleFunc("GET /api/v1/ws", fb.handleWS)
+	mux.HandleFunc("POST /api/v1/questions/{qid}", fb.handleReplyQuestion)
 	fb.srv = httptest.NewServer(mux)
 	t.Cleanup(func() {
 		close(fb.pushCh)
@@ -205,6 +207,17 @@ func (fb *fakeBackend) handleGetMessage(w http.ResponseWriter, r *http.Request) 
 	writeRaw(w, body)
 }
 
+func (fb *fakeBackend) handleReplyQuestion(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Answers [][]string `json:"answers"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	fb.mu.Lock()
+	fb.replQ = append(fb.replQ, body.Answers)
+	fb.mu.Unlock()
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (fb *fakeBackend) handleWS(w http.ResponseWriter, r *http.Request) {
 	conn, err := websocket.Accept(w, r, nil)
 	if err != nil {
@@ -237,6 +250,12 @@ func (fb *fakeBackend) receivedMessages() int {
 	fb.mu.Lock()
 	defer fb.mu.Unlock()
 	return len(fb.gotMsg)
+}
+
+func (fb *fakeBackend) questionReplies() [][][]string {
+	fb.mu.Lock()
+	defer fb.mu.Unlock()
+	return append([][][]string(nil), fb.replQ...)
 }
 
 // ── помощники событий ────────────────────────────────────────────────────────
