@@ -28,7 +28,9 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     # PEP 668 (externally-managed-environment) blocks plain `pip install`;
     # --break-system-packages installs poetry to /usr/local/bin for everyone.
-    && pip3 install --no-cache-dir --break-system-packages poetry
+    # web-forager = local DuckDuckGo MCP server for the agent's web search
+    # (keyless alternative to the built-in Exa websearch tool).
+    && pip3 install --no-cache-dir --break-system-packages poetry web-forager==3.0.1
 
 # Go toolchain. apt's golang-go on 24.04 is Go 1.22 — too old for the projects
 # here (notes-bot, ollama-bot, location need go >= 1.26), so install the
