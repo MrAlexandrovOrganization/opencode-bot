@@ -9,6 +9,9 @@ services:
       # OPENCODE_USERNAME / OPENCODE_PASSWORD credentials from .env.
       OPENCODE_SERVER_USERNAME: ${OPENCODE_USERNAME:-opencode}
       OPENCODE_SERVER_PASSWORD: ${OPENCODE_PASSWORD:-}
+      # API key for the agent's websearch tool (Exa MCP); without it Exa
+      # returns 403. Optional — empty leaves websearch broken.
+      EXA_API_KEY: ${EXA_API_KEY:-}
       # Git identity for the agent (git commit), from .env.
       GIT_USER_NAME: ${GIT_USER_NAME:-}
       GIT_USER_EMAIL: ${GIT_USER_EMAIL:-}
