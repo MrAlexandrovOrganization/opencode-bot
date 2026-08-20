@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"opencode-bot/internal/backend"
 	"opencode-bot/internal/config"
-	"opencode-bot/internal/opencode"
 	"opencode-bot/internal/whisper"
 
 	"github.com/mymmrac/telego"
@@ -23,7 +23,7 @@ const maxMessageLen = 4000
 // Bot is the main application struct.
 type Bot struct {
 	api     *telego.Bot
-	oc      *opencode.Client
+	backend *backend.Client
 	whisper *whisper.Client // nil if Whisper is not configured
 	cfg     *config.Config
 
@@ -32,13 +32,14 @@ type Bot struct {
 	chatID    int64 // telegram chat of the authorized user
 	busy      bool  // true while an opencode request is in flight
 	stream    *Stream
-	model     *opencode.ModelRef
+	model     *backend.ModelRef
 	agent     string
+	userMsgID string              // messageID user-эха текущего запроса (части игнорируются)
 	perms     map[string]*permAsk // permissionID -> pending "ask" prompt
 	pendingQ  *pendingQuestions   // question the agent is awaiting an answer to
 }
 
-// Stream tracks the in-flight assistant message so the SSE bus can
+// Stream tracks the in-flight assistant message so the WebSocket bus can
 // update the Telegram placeholder with live partial text or the current
 // agent activity (tool calls / reasoning).
 type Stream struct {
@@ -50,6 +51,10 @@ type Stream struct {
 	reasoningLog []string // reasoning of all completed steps
 	status       string   // transient "what the agent is doing now" line
 	log          []string // completed tool calls (✓/✗ lines)
+
+	done         chan struct{} // closed when the response is finalizing
+	stopped      chan struct{} // closed by the preview loop when it exits
+	finalizeOnce sync.Once
 }
 
 // toolPartState mirrors the "tool" part state of the opencode server.
@@ -66,10 +71,10 @@ type permAsk struct {
 }
 
 // New creates a new Bot.
-func New(api *telego.Bot, oc *opencode.Client, whisperClient *whisper.Client, cfg *config.Config) *Bot {
+func New(api *telego.Bot, backendClient *backend.Client, whisperClient *whisper.Client, cfg *config.Config) *Bot {
 	return &Bot{
 		api:     api,
-		oc:      oc,
+		backend: backendClient,
 		whisper: whisperClient,
 		cfg:     cfg,
 		agent:   cfg.DefaultAgent,
@@ -91,7 +96,7 @@ func (b *Bot) sessionIDFor(ctx context.Context) (string, error) {
 }
 
 func (b *Bot) newSession(ctx context.Context) (string, error) {
-	s, err := b.oc.CreateSession(ctx, "telegram-bot")
+	s, err := b.backend.CreateSession(ctx, "telegram-bot")
 	if err != nil {
 		return "", err
 	}
@@ -156,10 +161,10 @@ func (b *Bot) Run(ctx context.Context) {
 	}
 }
 
-// eventLoop keeps a single SSE subscription alive, reconnecting with backoff.
+// eventLoop keeps a single WebSocket subscription alive, reconnecting with backoff.
 func (b *Bot) eventLoop(ctx context.Context) {
 	for {
-		err := b.oc.Events(ctx, b.handleEvent)
+		err := b.backend.Events(ctx, b.handleEvent)
 		if ctx.Err() != nil {
 			return
 		}
@@ -172,11 +177,13 @@ func (b *Bot) eventLoop(ctx context.Context) {
 	}
 }
 
-// handleEvent dispatches SSE bus events of interest.
-func (b *Bot) handleEvent(ev opencode.Event) {
+// handleEvent dispatches WebSocket events of interest.
+func (b *Bot) handleEvent(ev backend.Event) {
 	switch ev.Type {
 	case "message.part.updated":
 		b.onMessagePartUpdated(ev)
+	case "message.updated":
+		b.onMessageUpdated(ev)
 	case "permission.asked":
 		b.onPermissionAsked(ev)
 	case "question.asked":
@@ -184,7 +191,7 @@ func (b *Bot) handleEvent(ev opencode.Event) {
 	}
 }
 
-func (b *Bot) onMessagePartUpdated(ev opencode.Event) {
+func (b *Bot) onMessagePartUpdated(ev backend.Event) {
 	var props struct {
 		Part struct {
 			ID        string        `json:"id"`
@@ -201,6 +208,10 @@ func (b *Bot) onMessagePartUpdated(ev opencode.Event) {
 		return
 	}
 	if props.Part.SessionID != b.currentSessionID() {
+		return
+	}
+	// Части user-эха (копия запроса пользователя) не должны попадать в стрим.
+	if props.Part.MessageID != "" && props.Part.MessageID == b.userEchoID() {
 		return
 	}
 	st := b.currentStream()
@@ -250,6 +261,56 @@ func (b *Bot) onMessagePartUpdated(ev opencode.Event) {
 			st.reasoning = props.Part.Text
 		}
 	}
+}
+
+func (b *Bot) userEchoID() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.userMsgID
+}
+
+// onMessageUpdated handles the final message of the current request. The
+// backend forwards message.updated both for the user echo, intermediate
+// assistant steps (including finish="tool-calls") and the completed response.
+// Only the gateway's own publish carries a top-level sessionID and fires once,
+// after the final message is saved to history — so we finalize exclusively on
+// it.
+func (b *Bot) onMessageUpdated(ev backend.Event) {
+	var props struct {
+		SessionID string          `json:"sessionID"`
+		Info      backend.Message `json:"info"`
+	}
+	if err := unmarshalProps(ev, &props); err != nil {
+		return
+	}
+	sess := props.SessionID
+	if sess == "" {
+		sess = props.Info.SessionID
+	}
+	if sess != b.currentSessionID() {
+		return
+	}
+	st := b.currentStream()
+	if st == nil {
+		return
+	}
+	// Запоминаем user-эхо, чтобы не собирать его части в стрим.
+	if props.Info.Role == "user" && props.Info.ID != "" {
+		b.mu.Lock()
+		b.userMsgID = props.Info.ID
+		b.mu.Unlock()
+		return
+	}
+	// События глобальной шины (промежуточные шаги, tool-calls, финальные
+	// дубликаты) не имеют top-level sessionID — не финализируем на них.
+	if props.SessionID == "" {
+		return
+	}
+	if msg := props.Info.MessageError(); msg != "" {
+		b.finishStream(st, props.Info, "❌ "+msg)
+		return
+	}
+	b.finishStream(st, props.Info, "")
 }
 
 // appendLog records a finished tool call, keeping a bounded history.
@@ -303,9 +364,11 @@ func (b *Bot) currentSessionID() string {
 
 // ── Request flow ─────────────────────────────────────────────────────────────
 
-// streamResponse sends the request to opencode and streams partial text
-// into a "💭" placeholder until the final response arrives.
-func (b *Bot) streamResponse(ctx context.Context, chatID int64, req opencode.MessageRequest) (string, error) {
+// startRequest sends the request to the backend asynchronously (202 +
+// messageID) and streams partial text into a "💭" placeholder. The response
+// is finalized by onMessageUpdated when the backend emits message.updated,
+// or by the watchdog on timeout. busy is released exactly once on finish.
+func (b *Bot) startRequest(ctx context.Context, chatID int64, req backend.MessageRequest) {
 	_ = b.api.SendChatAction(ctx, &telego.SendChatActionParams{
 		ChatID: telego.ChatID{ID: chatID},
 		Action: "typing",
@@ -313,65 +376,89 @@ func (b *Bot) streamResponse(ctx context.Context, chatID int64, req opencode.Mes
 
 	placeholder, err := b.api.SendMessage(ctx, tu.Message(tu.ID(chatID), "💭 Работаю…"))
 	if err != nil {
-		return "", fmt.Errorf("send placeholder: %w", err)
+		b.release()
+		return
 	}
 
 	b.beginStream(chatID, placeholder.MessageID)
-	defer b.endStream()
+	st := b.currentStream()
+	st.done = make(chan struct{})
+	st.stopped = make(chan struct{})
+	// previewLoop стартуем сразу: он единственный, кто закрывает st.stopped,
+	// на который ждёт finishStream в путях ошибок (CreateSession/SendMessage).
+	go b.previewLoop(st, chatID)
 
 	sessionID, err := b.sessionIDFor(ctx)
 	if err != nil {
-		b.editMessage(context.Background(), chatID, placeholder.MessageID, "❌ "+err.Error())
-		return "", fmt.Errorf("session: %w", err)
+		b.finishStream(st, backend.Message{}, "❌ "+err.Error())
+		return
 	}
 
-	reqCtx, cancel := context.WithTimeout(context.Background(), b.cfg.RequestTimeout)
-	defer cancel()
+	if _, err := b.backend.SendMessage(ctx, sessionID, req); err != nil {
+		b.finishStream(st, backend.Message{}, "❌ "+err.Error())
+		return
+	}
 
-	// Live preview: edit the placeholder while the request runs.
-	done := make(chan struct{})
-	stopped := make(chan struct{})
-	go func() {
-		defer close(stopped)
-		ticker := time.NewTicker(1200 * time.Millisecond)
-		defer ticker.Stop()
-		var last string
-		for {
-			select {
-			case <-done:
-				return
-			case <-ticker.C:
-				curr := b.previewText()
-				if curr != last && curr != "" {
-					b.editMessage(reqCtx, chatID, placeholder.MessageID, truncate(curr)+"▌")
-					last = curr
-				}
+	go b.timeoutLoop(st)
+}
+
+// finishStream stops the live preview and finalizes the placeholder. errText,
+// when non-empty, replaces the placeholder with an error; otherwise the
+// accumulated partial text is rendered together with the tool log, reasoning
+// and the token/cost footer. Idempotent — runs exactly once per request.
+func (b *Bot) finishStream(st *Stream, info backend.Message, errText string) {
+	st.finalizeOnce.Do(func() {
+		if st.done != nil {
+			close(st.done)
+		}
+		if st.stopped != nil {
+			<-st.stopped
+		}
+		if errText != "" {
+			b.editMessage(context.Background(), st.chatID, st.messageID, truncate(errText))
+		} else {
+			text := b.finalText(st, info)
+			if text == "" {
+				text = "✅ Готово."
+			}
+			b.sendFinalResponse(context.Background(), st.chatID, st.messageID, text, info, b.toolLog(), b.reasoningLog())
+		}
+		b.endStream()
+		b.release()
+	})
+}
+
+// previewLoop keeps the placeholder up to date with the stream state.
+func (b *Bot) previewLoop(st *Stream, chatID int64) {
+	defer close(st.stopped)
+	ticker := time.NewTicker(1200 * time.Millisecond)
+	defer ticker.Stop()
+	var last string
+	for {
+		select {
+		case <-st.done:
+			return
+		case <-ticker.C:
+			curr := b.previewText()
+			if curr != last && curr != "" {
+				b.editMessage(context.Background(), chatID, st.messageID, truncate(curr)+"▌")
+				last = curr
 			}
 		}
-	}()
+	}
+}
 
-	resp, err := b.oc.SendMessage(reqCtx, sessionID, req)
-	close(done)
-	<-stopped
-
-	if err != nil {
-		b.editMessage(context.Background(), chatID, placeholder.MessageID, "❌ "+err.Error())
-		return "", err
+// timeoutLoop aborts the request if the backend does not respond within the
+// configured timeout (covers waiting for the user on permissions/questions).
+func (b *Bot) timeoutLoop(st *Stream) {
+	timer := time.NewTimer(b.cfg.RequestTimeout)
+	defer timer.Stop()
+	select {
+	case <-st.done:
+		return
+	case <-timer.C:
+		b.finishStream(st, backend.Message{}, "❌ Превышено время ожидания ответа")
 	}
-	if msg := resp.MessageError(); msg != "" {
-		b.editMessage(context.Background(), chatID, placeholder.MessageID, "❌ "+msg)
-		return "", fmt.Errorf("%s", msg)
-	}
-
-	text := resp.Text()
-	if text == "" {
-		text = b.partialText()
-	}
-	if text == "" {
-		text = "✅ Готово."
-	}
-	b.sendFinalResponse(context.Background(), chatID, placeholder.MessageID, text, resp.Info, b.toolLog(), b.reasoningLog())
-	return text, nil
 }
 
 func (b *Bot) partialText() string {
@@ -381,6 +468,28 @@ func (b *Bot) partialText() string {
 		return st.partial
 	}
 	return ""
+}
+
+// finalText возвращает окончательный текст ответа. Для завершённого сообщения
+// ассистента берём полный текст из истории шлюза (там он сохранён до публикации
+// message.updated), а не из потокового partial: финальная текстовая часть может
+// прийти после события message.updated. Ретраи — страховка на случай гонки
+// между сохранением и событием; при недоступности истории — fallback на partial.
+func (b *Bot) finalText(st *Stream, info backend.Message) string {
+	sessionID := b.currentSessionID()
+	if info.ID != "" && sessionID != "" {
+		for i := 0; i < 15; i++ {
+			msg, err := b.backend.GetMessage(context.Background(), sessionID, info.ID)
+			if err == nil {
+				if t := msg.Text(); t != "" {
+					return t
+				}
+				return b.partialText()
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+	}
+	return b.partialText()
 }
 
 // previewText returns what should be shown in the live placeholder right now:
@@ -476,7 +585,7 @@ func (b *Bot) editMessageHTML(ctx context.Context, chatID int64, msgID int, html
 // messages as needed, splitting on line boundaries (runes as a fallback for
 // over-long lines). The token/cost footer is appended to the last message
 // when it fits, otherwise sent as its own message.
-func (b *Bot) sendFinalResponse(ctx context.Context, chatID int64, msgID int, text string, info opencode.AssistantInfo, toolLog, reasoning []string) {
+func (b *Bot) sendFinalResponse(ctx context.Context, chatID int64, msgID int, text string, info backend.Message, toolLog, reasoning []string) {
 	chunks := buildFinalChunks(text, info, toolLog, reasoning)
 	if len(chunks) == 0 {
 		b.editMessageHTML(ctx, chatID, msgID, "✅ Готово.")
@@ -492,7 +601,7 @@ func (b *Bot) sendFinalResponse(ctx context.Context, chatID int64, msgID int, te
 // activity summary (tool log + reasoning), then the markdown-formatted
 // answer, then the footer (appended to the last message when it fits).
 // Every chunk stays within maxMessageLen runes.
-func buildFinalChunks(text string, info opencode.AssistantInfo, toolLog, reasoning []string) []string {
+func buildFinalChunks(text string, info backend.Message, toolLog, reasoning []string) []string {
 	var chunks []string
 	if act := splitActivityChunks(toolLog, reasoning); len(act) > 0 {
 		chunks = append(chunks, act...)
@@ -734,7 +843,7 @@ func isMarkdownListItem(s string) bool {
 	return strings.HasPrefix(s, "- ") || strings.HasPrefix(s, "* ") || reOrderedList.MatchString(s)
 }
 
-func formatFooter(info opencode.AssistantInfo) string {
+func formatFooter(info backend.Message) string {
 	if info.Cost == 0 && info.Tokens.Input == 0 && info.Tokens.Output == 0 {
 		return ""
 	}
@@ -750,7 +859,7 @@ func formatCost(c float64) string {
 	return "$" + strings.TrimRight(s, ".")
 }
 
-func unmarshalProps(ev opencode.Event, out any) error {
+func unmarshalProps(ev backend.Event, out any) error {
 	return json.Unmarshal(ev.Properties, out)
 }
 

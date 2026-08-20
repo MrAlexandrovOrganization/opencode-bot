@@ -10,9 +10,9 @@ import (
 	"syscall"
 	"time"
 
+	"opencode-bot/internal/backend"
 	"opencode-bot/internal/bot"
 	"opencode-bot/internal/config"
-	"opencode-bot/internal/opencode"
 	"opencode-bot/internal/whisper"
 
 	"github.com/mymmrac/telego"
@@ -46,9 +46,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	oc := opencode.New(cfg.OpenCodeBaseURL, cfg.OpenCodeUsername, cfg.OpenCodePassword)
-	if err := oc.Health(context.Background()); err != nil {
-		slog.Warn("opencode server unreachable", "url", cfg.OpenCodeBaseURL, "error", err)
+	backendClient := backend.New(cfg.BackendBaseURL, cfg.BackendToken)
+	if err := backendClient.Health(context.Background()); err != nil {
+		slog.Warn("opencode-backend unreachable", "url", cfg.BackendBaseURL, "error", err)
 	}
 
 	var whisperClient *whisper.Client
@@ -62,7 +62,7 @@ func main() {
 		slog.Info("whisper configured", "host", cfg.WhisperGRPCHost, "port", cfg.WhisperGRPCPort)
 	}
 
-	b := bot.New(api, oc, whisperClient, cfg)
+	b := bot.New(api, backendClient, whisperClient, cfg)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()

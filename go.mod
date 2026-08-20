@@ -3,6 +3,7 @@ module opencode-bot
 go 1.26.6
 
 require (
+	github.com/coder/websocket v1.8.15
 	github.com/mymmrac/telego v1.8.0
 	google.golang.org/grpc v1.64.0
 	google.golang.org/protobuf v1.34.2

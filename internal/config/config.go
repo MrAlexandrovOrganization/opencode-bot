@@ -11,9 +11,8 @@ import (
 type Config struct {
 	BotToken            string
 	RootID              int64
-	OpenCodeBaseURL     string
-	OpenCodeUsername    string
-	OpenCodePassword    string
+	BackendBaseURL      string // URL opencode-backend (шлюза)
+	BackendToken        string // токен доступа к шлюзу (его ADMIN_TOKEN)
 	DefaultModel        string
 	DefaultAgent        string
 	PermissionMode      string
@@ -43,12 +42,16 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("OPENCODE_REQUEST_TIMEOUT: %w", err)
 	}
 
+	backendToken := os.Getenv("BACKEND_TOKEN")
+	if backendToken == "" {
+		return nil, fmt.Errorf("BACKEND_TOKEN is required")
+	}
+
 	return &Config{
 		BotToken:            token,
 		RootID:              rootID,
-		OpenCodeBaseURL:     getEnv("OPENCODE_BASE_URL", "http://localhost:4096"),
-		OpenCodeUsername:    getEnv("OPENCODE_USERNAME", "opencode"),
-		OpenCodePassword:    os.Getenv("OPENCODE_PASSWORD"),
+		BackendBaseURL:      getEnv("BACKEND_BASE_URL", "http://localhost:8080"),
+		BackendToken:        backendToken,
 		DefaultModel:        os.Getenv("OPENCODE_MODEL"),
 		DefaultAgent:        getEnv("OPENCODE_AGENT", "build"),
 		PermissionMode:      getEnv("PERMISSION_MODE", "ask"),

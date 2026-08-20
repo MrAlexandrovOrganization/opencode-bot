@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"opencode-bot/internal/opencode"
+	"opencode-bot/internal/backend"
 )
 
 func TestMarkdownToHTML(t *testing.T) {
@@ -66,7 +66,7 @@ func TestMarkdownToHTML(t *testing.T) {
 }
 
 func TestBuildFinalChunks(t *testing.T) {
-	info := opencode.AssistantInfo{
+	info := backend.Message{
 		Cost: 0.0123,
 		Tokens: struct {
 			Input  int `json:"input"`

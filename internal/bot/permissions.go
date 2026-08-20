@@ -7,15 +7,15 @@ import (
 	"strings"
 	"time"
 
-	"opencode-bot/internal/opencode"
+	"opencode-bot/internal/backend"
 
 	"github.com/mymmrac/telego"
 	tu "github.com/mymmrac/telego/telegoutil"
 )
 
 // onPermissionAsked handles a permission request from the server.
-func (b *Bot) onPermissionAsked(ev opencode.Event) {
-	var p opencode.PermissionAsked
+func (b *Bot) onPermissionAsked(ev backend.Event) {
+	var p backend.PermissionAsked
 	if err := unmarshalProps(ev, &p); err != nil {
 		slog.Warn("parse permission", "error", err)
 		return
@@ -26,16 +26,16 @@ func (b *Bot) onPermissionAsked(ev opencode.Event) {
 
 	switch b.cfg.PermissionMode {
 	case "allow":
-		_ = b.oc.ReplyPermission(context.Background(), p.SessionID, p.ID, "always")
+		_ = b.backend.ReplyPermission(context.Background(), p.SessionID, p.ID, "always")
 	case "deny":
-		_ = b.oc.ReplyPermission(context.Background(), p.SessionID, p.ID, "reject")
+		_ = b.backend.ReplyPermission(context.Background(), p.SessionID, p.ID, "reject")
 	default:
 		b.askPermission(p)
 	}
 }
 
 // askPermission forwards a permission request to Telegram with inline buttons.
-func (b *Bot) askPermission(p opencode.PermissionAsked) {
+func (b *Bot) askPermission(p backend.PermissionAsked) {
 	b.mu.Lock()
 	if _, ok := b.perms[p.ID]; ok {
 		b.mu.Unlock()
@@ -112,7 +112,7 @@ func (b *Bot) handleCallback(query *telego.CallbackQuery) {
 		"reject": "❌ Отклонено",
 	}[response]
 
-	err := b.oc.ReplyPermission(context.Background(), b.currentSessionID(), permissionID, response)
+	err := b.backend.ReplyPermission(context.Background(), b.currentSessionID(), permissionID, response)
 	if err != nil {
 		slog.Error("reply permission", "error", err)
 		label = "❌ Ошибка: " + err.Error()

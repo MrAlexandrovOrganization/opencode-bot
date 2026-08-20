@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"opencode-bot/internal/opencode"
+	"opencode-bot/internal/backend"
 
 	"github.com/mymmrac/telego"
 	tu "github.com/mymmrac/telego/telegoutil"
@@ -74,6 +74,9 @@ func (b *Bot) cmdHelp(msg *telego.Message) {
 
 func (b *Bot) cmdReset(msg *telego.Message) {
 	ctx := context.Background()
+	if old := b.currentSessionID(); old != "" {
+		_ = b.backend.DeleteSession(ctx, old)
+	}
 	id, err := b.newSession(ctx)
 	if err != nil {
 		slog.Error("reset", "error", err)
@@ -90,7 +93,7 @@ func (b *Bot) cmdSession(msg *telego.Message) {
 		b.send(msg.Chat.ID, "Сессия ещё не создана — напиши первое сообщение.")
 		return
 	}
-	s, err := b.oc.GetSession(ctx, id)
+	s, err := b.backend.GetSession(ctx, id)
 	if err != nil {
 		b.send(msg.Chat.ID, "Не удалось получить сессию: "+err.Error())
 		return
@@ -115,7 +118,7 @@ func (b *Bot) cmdSession(msg *telego.Message) {
 		escapeHTML(s.Directory),
 		escapeHTML(agent),
 		model,
-		time.UnixMilli(s.Time.Created).Format(time.RFC1123),
+		s.CreatedAt.Format(time.RFC1123),
 	)
 	b.sendHTML(msg.Chat.ID, text, nil)
 }
@@ -126,7 +129,7 @@ func (b *Bot) cmdAbort(msg *telego.Message) {
 		b.send(msg.Chat.ID, "Нет активной сессии.")
 		return
 	}
-	if err := b.oc.AbortSession(context.Background(), id); err != nil {
+	if err := b.backend.AbortSession(context.Background(), id); err != nil {
 		b.send(msg.Chat.ID, "Не удалось прервать: "+err.Error())
 		return
 	}
@@ -156,7 +159,7 @@ func (b *Bot) cmdModel(msg *telego.Message) {
 	}
 
 	b.mu.Lock()
-	b.model = &opencode.ModelRef{ProviderID: parts[0], ModelID: parts[1]}
+	b.model = &backend.ModelRef{ProviderID: parts[0], ModelID: parts[1]}
 	b.mu.Unlock()
 	b.send(msg.Chat.ID, "✅ Модель: <code>"+escapeHTML(args)+"</code>")
 }

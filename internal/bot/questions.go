@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"opencode-bot/internal/opencode"
+	"opencode-bot/internal/backend"
 
 	"github.com/mymmrac/telego"
 	tu "github.com/mymmrac/telego/telegoutil"
@@ -18,7 +18,7 @@ import (
 // are accumulated in order and submitted to the server once all are known.
 type pendingQuestions struct {
 	requestID string
-	questions []opencode.Question
+	questions []backend.Question
 	answers   [][]string
 	idx       int // index of the question currently being asked
 	chatID    int64
@@ -26,8 +26,8 @@ type pendingQuestions struct {
 }
 
 // onQuestionAsked handles a question from the agent (question tool).
-func (b *Bot) onQuestionAsked(ev opencode.Event) {
-	var q opencode.QuestionAsked
+func (b *Bot) onQuestionAsked(ev backend.Event) {
+	var q backend.QuestionAsked
 	if err := unmarshalProps(ev, &q); err != nil {
 		slog.Warn("parse question", "error", err)
 		return
@@ -130,7 +130,7 @@ func (b *Bot) answerCurrent(qidx int, label string) {
 // submitQuestionReply posts the accumulated answers and clears the pending
 // state, letting the agent continue.
 func (b *Bot) submitQuestionReply(p *pendingQuestions) {
-	err := b.oc.ReplyQuestion(context.Background(), p.requestID, p.answers)
+	err := b.backend.ReplyQuestion(context.Background(), p.requestID, p.answers)
 	b.mu.Lock()
 	if b.pendingQ == p {
 		b.pendingQ = nil

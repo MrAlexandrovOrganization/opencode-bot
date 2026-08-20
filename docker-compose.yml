@@ -39,18 +39,54 @@ services:
       retries: 10
       start_period: 30s
 
+  opencode-backend:
+    build:
+      context: ../../backends/opencode-backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      opencode-server:
+        condition: service_healthy
+    environment:
+      # Единственный клиент opencode-сервера — шлюз.
+      OPENCODE_BASE_URL: http://opencode-server:4096
+      OPENCODE_USERNAME: ${OPENCODE_USERNAME:-opencode}
+      OPENCODE_PASSWORD: ${OPENCODE_PASSWORD:-}
+      OPENCODE_MODEL: ${OPENCODE_MODEL:-}
+      OPENCODE_AGENT: ${OPENCODE_AGENT:-build}
+      PERMISSION_MODE: ${PERMISSION_MODE:-ask}
+      OPENCODE_REQUEST_TIMEOUT: ${OPENCODE_REQUEST_TIMEOUT:-30m}
+      # Рабочая директория шлюза видна opencode-серверу как /workspace —
+      # загруженные файлы агент может читать.
+      WORKSPACE_DIR: /workspace
+      # Токен, которым бот (и другие фронтенды) ходит в шлюз.
+      ADMIN_TOKEN: ${BACKEND_TOKEN:-}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - /home/maxim/projects:/workspace
+    networks:
+      - whisper-net
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    extends:
+      file: docker-compose.base.yml
+      service: base
+
   opencode-bot:
     build: .
     restart: unless-stopped
     env_file: .env
     depends_on:
-      opencode-server:
+      opencode-backend:
         condition: service_healthy
     environment:
-      # opencode server runs as the opencode-server service on the same network.
-      OPENCODE_BASE_URL: http://opencode-server:4096
-      OPENCODE_USERNAME: ${OPENCODE_USERNAME:-opencode}
-      OPENCODE_PASSWORD: ${OPENCODE_PASSWORD:-}
+      # Бот ходит только в шлюз (REST + WebSocket).
+      BACKEND_BASE_URL: http://opencode-backend:8080
+      BACKEND_TOKEN: ${BACKEND_TOKEN:-}
       OPENCODE_MODEL: ${OPENCODE_MODEL:-}
       OPENCODE_AGENT: ${OPENCODE_AGENT:-build}
       PERMISSION_MODE: ${PERMISSION_MODE:-ask}

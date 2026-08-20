@@ -7,12 +7,10 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
-	"opencode-bot/internal/opencode"
+	"opencode-bot/internal/backend"
 	"opencode-bot/internal/whisper"
 
 	"github.com/mymmrac/telego"
@@ -20,9 +18,9 @@ import (
 )
 
 // newMessageRequest builds a request with the configured agent and model.
-func (b *Bot) newMessageRequest() opencode.MessageRequest {
+func (b *Bot) newMessageRequest() backend.MessageRequest {
 	b.mu.Lock()
-	req := opencode.MessageRequest{Agent: b.agent}
+	req := backend.MessageRequest{Agent: b.agent}
 	if b.model != nil {
 		req.Model = b.model
 	}
@@ -30,7 +28,7 @@ func (b *Bot) newMessageRequest() opencode.MessageRequest {
 	return req
 }
 
-// handleText processes a plain text message: sends it to opencode and
+// handleText processes a plain text message: sends it to the backend and
 // streams the response back into the placeholder.
 func (b *Bot) handleText(msg *telego.Message) {
 	if !b.tryAcquire() {
@@ -39,47 +37,39 @@ func (b *Bot) handleText(msg *telego.Message) {
 	}
 	req := b.newMessageRequest()
 	req.AddText(msg.Text)
-	response, err := b.streamResponse(context.Background(), msg.Chat.ID, req)
-	b.release()
-	if err != nil {
-		slog.Error("text", "error", err)
-		return
-	}
-	slog.Info("response", "chat_id", msg.Chat.ID, "chars", len(response))
+	b.startRequest(context.Background(), msg.Chat.ID, req)
 }
 
-// handlePhoto downloads a photo, attaches it as a file part and sends it to
-// opencode. The caption (if any) is used as the user's question.
+// handlePhoto downloads a photo, uploads it through the backend and sends it
+// to opencode. The caption (if any) is used as the user's question.
 func (b *Bot) handlePhoto(msg *telego.Message) {
 	if !b.tryAcquire() {
 		b.send(msg.Chat.ID, "⏳ Подожди, я ещё думаю...")
 		return
 	}
-	defer b.release()
 
 	ctx := context.Background()
 	photo := msg.Photo[len(msg.Photo)-1]
 	data, err := b.downloadFile(ctx, photo.FileID)
 	if err != nil {
+		b.release()
 		b.send(msg.Chat.ID, "Не удалось скачать фото: "+err.Error())
 		return
 	}
 
-	path, cleanup, err := writeTempFile(data, "photo.jpg")
+	url, err := b.backend.UploadFile(ctx, "photo.jpg", "image/jpeg", bytes.NewReader(data))
 	if err != nil {
-		b.send(msg.Chat.ID, "Не удалось сохранить фото: "+err.Error())
+		b.release()
+		b.send(msg.Chat.ID, "Не удалось загрузить фото: "+err.Error())
 		return
 	}
-	defer cleanup()
 
 	req := b.newMessageRequest()
-	req.AddFile("image/jpeg", "photo.jpg", "file://"+path)
+	req.AddFile("image/jpeg", "photo.jpg", url)
 	if caption := strings.TrimSpace(msg.Caption); caption != "" {
 		req.AddText(caption)
 	}
-	if _, err := b.streamResponse(ctx, msg.Chat.ID, req); err != nil {
-		slog.Error("photo", "error", err)
-	}
+	b.startRequest(ctx, msg.Chat.ID, req)
 }
 
 // handleVoice transcribes a voice message or video note via the shared
@@ -100,7 +90,6 @@ func (b *Bot) handleVoice(msg *telego.Message) {
 		b.send(msg.Chat.ID, "⏳ Подожди, я ещё думаю...")
 		return
 	}
-	defer b.release()
 
 	ctx := context.Background()
 
@@ -111,17 +100,20 @@ func (b *Bot) handleVoice(msg *telego.Message) {
 	case msg.VideoNote != nil:
 		fileID, format = msg.VideoNote.FileID, "mp4"
 	default:
+		b.release()
 		return
 	}
 
 	statusMsg, err := b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), "⏳ Скачиваю аудио..."))
 	if err != nil {
+		b.release()
 		slog.Error("send status", "error", err)
 		return
 	}
 
 	data, err := b.downloadFile(ctx, fileID)
 	if err != nil {
+		b.release()
 		b.editMessage(ctx, msg.Chat.ID, statusMsg.MessageID, "❌ Не удалось скачать аудио: "+err.Error())
 		return
 	}
@@ -131,6 +123,7 @@ func (b *Bot) handleVoice(msg *telego.Message) {
 
 	text, err := b.transcribeVoice(ctx, data, format, msg.Chat.ID, statusMsg.MessageID)
 	if err != nil {
+		b.release()
 		slog.Error("transcribe", "error", err)
 		b.editMessage(ctx, msg.Chat.ID, statusMsg.MessageID, "❌ Ошибка расшифровки: "+err.Error())
 		return
@@ -142,9 +135,7 @@ func (b *Bot) handleVoice(msg *telego.Message) {
 	b.editMessage(ctx, msg.Chat.ID, statusMsg.MessageID, "📝 "+truncate(text))
 	req := b.newMessageRequest()
 	req.AddText(text)
-	if _, err := b.streamResponse(ctx, msg.Chat.ID, req); err != nil {
-		slog.Error("voice", "error", err)
-	}
+	b.startRequest(ctx, msg.Chat.ID, req)
 }
 
 // transcribeVoice submits audio to the Whisper gRPC service and polls for
@@ -212,17 +203,18 @@ func (b *Bot) transcribeVoice(ctx context.Context, data []byte, format string, c
 	}
 }
 
-// handleDocument downloads a document and attaches it as a file part.
+// handleDocument downloads a document, uploads it through the backend and
+// attaches it as a file part.
 func (b *Bot) handleDocument(msg *telego.Message) {
 	if !b.tryAcquire() {
 		b.send(msg.Chat.ID, "⏳ Подожди, я ещё думаю...")
 		return
 	}
-	defer b.release()
 
 	ctx := context.Background()
 	data, err := b.downloadFile(ctx, msg.Document.FileID)
 	if err != nil {
+		b.release()
 		b.send(msg.Chat.ID, "Не удалось скачать документ: "+err.Error())
 		return
 	}
@@ -236,21 +228,19 @@ func (b *Bot) handleDocument(msg *telego.Message) {
 		mime = "application/octet-stream"
 	}
 
-	path, cleanup, err := writeTempFile(data, filename)
+	url, err := b.backend.UploadFile(ctx, filename, mime, bytes.NewReader(data))
 	if err != nil {
-		b.send(msg.Chat.ID, "Не удалось сохранить документ: "+err.Error())
+		b.release()
+		b.send(msg.Chat.ID, "Не удалось загрузить документ: "+err.Error())
 		return
 	}
-	defer cleanup()
 
 	req := b.newMessageRequest()
-	req.AddFile(mime, filename, "file://"+path)
+	req.AddFile(mime, filename, url)
 	if caption := strings.TrimSpace(msg.Caption); caption != "" {
 		req.AddText(caption)
 	}
-	if _, err := b.streamResponse(ctx, msg.Chat.ID, req); err != nil {
-		slog.Error("document", "error", err)
-	}
+	b.startRequest(ctx, msg.Chat.ID, req)
 }
 
 // ── File helpers ─────────────────────────────────────────────────────────────
@@ -272,29 +262,4 @@ func (b *Bot) downloadFile(ctx context.Context, fileID string) ([]byte, error) {
 	}
 	defer resp.Body.Close()
 	return io.ReadAll(resp.Body)
-}
-
-// writeTempFile writes data to a temp file and returns its path plus a
-// cleanup function.
-func writeTempFile(data []byte, name string) (string, func(), error) {
-	f, err := os.CreateTemp("", "opencode-*")
-	if err != nil {
-		return "", nil, err
-	}
-	path := f.Name() + filepath.Ext(name)
-	if err := os.Rename(f.Name(), path); err != nil {
-		f.Close()
-		os.Remove(f.Name())
-		return "", nil, err
-	}
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		os.Remove(path)
-		return "", nil, err
-	}
-	if err := f.Close(); err != nil {
-		os.Remove(path)
-		return "", nil, err
-	}
-	return path, func() { os.Remove(path) }, nil
 }

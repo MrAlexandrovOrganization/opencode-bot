@@ -3,9 +3,9 @@ DOCKER_COMPOSE = docker compose
 GO_UNIT_PKGS = \
 	./cmd/... \
 	./internal/... \
+	./internal/backend/... \
 	./internal/bot/... \
 	./internal/config/... \
-	./internal/opencode/... \
 	./internal/whisper/...
 
 # Canonical source of whisper.proto.

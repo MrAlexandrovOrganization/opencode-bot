@@ -7,15 +7,18 @@
 
 **opencode-bot** — Telegram-бот на Go, который проксирует сообщения в
 [opencode](https://opencode.ai) — агента, умеющего читать/редактировать файлы,
-выполнять команды и работать с git. Бот — единственный клиент `opencode-server`
-(HTTP API + SSE event bus).
+выполнять команды и работать с git. Бот — фронтенд над **opencode-backend**
+(шлюз, репозиторий в `/home/maxim/projects/backends/opencode-backend`):
+вся работа с `opencode-server` (сессии, асинхронные сообщения, WebSocket-события,
+permissions, вопросы, загрузка файлов) идёт через его REST `/api/v1` + WS.
 
 Язык интерфейсных строк, логов и комментариев — **русский**. Код — идиоматичный Go,
-без внешних веб-фреймворков (только `telego`, `grpc`, стандартная библиотека).
+без внешних веб-фреймворков (только `telego`, `grpc`, `coder/websocket`,
+стандартная библиотека).
 
 ## Как это запускается
 
-Два сервиса в `docker-compose.yml`:
+Три сервиса в `docker-compose.yml`:
 
 - **`opencode-server`** (`Dockerfile.server`) — сам opencode-сервер, бинарник из
   GitHub Releases (`anomalyco/opencode`), слушает порт `4096`. Mounts:
@@ -26,22 +29,28 @@
     состояние, конфиги, провайдеры, БД.
   - Служит под `ubuntu` (UID 1000), git-identity задаётся из env через
     `scripts/entrypoint.sh`.
+- **`opencode-backend`** (`../backends/opencode-backend/Dockerfile`) — шлюз:
+  REST + WebSocket, асинхронные сессии, история, permissions, вопросы, upload.
+  Пишет загруженные файлы в `/workspace/.opencode-backend/uploads` (маунт
+  `/home/maxim/projects:/workspace`), поэтому агент их видит. Слушает порт `8080`.
 - **`opencode-bot`** (`Dockerfile`) — сам бот. Собирает Go-бинарник, proto-стабы
-  генерируются внутри образа. Запускается с `env_file: .env`.
+  генерируются внутри образа. Запускается с `env_file: .env`, ходит только
+  в `opencode-backend` (`BACKEND_BASE_URL`, `BACKEND_TOKEN`).
 
 Внешние сети: `telegram-net` (общий локальный Telegram Bot API-сервер) и
-`whisper-net` (общий gRPC-сервис транскрибации).
+`whisper-net` (общий gRPC-сервис транскрибации; на ней же сидят `opencode-server`
+и `opencode-backend`).
 
-Запуск: `make up` (сборка + старт), `make server` (только сервер).
+Запуск: `make up` (сборка + старт), `make server` (только opencode-server).
 
 ## Структура репозитория
 
 ```
-cmd/bot/main.go              — точка входа: конфиг, HTTP-клиент, telegram, opencode,
+cmd/bot/main.go              — точка входа: конфиг, HTTP-клиент, telegram, backend,
                                whisper, запуск Bot.Run(ctx)
 internal/bot/                — ТЕЛЕГРАМ-ЛОГИКА + движок взаимодействия с opencode
   bot.go                     — состояние: sessionID, chatID, busy, Stream, perms,
-                               pendingQ; SSE event loop; стриминг ответа в placeholder;
+                               pendingQ; WS event loop; стриминг ответа в placeholder;
                                форматирование markdown→HTML и нарезка сообщений
   update.go                  — разбор апдейтов, авторизация по ROOT_ID, маршрутизация
                                (text/photo/document/voice/command/callback)
@@ -52,9 +61,12 @@ internal/bot/                — ТЕЛЕГРАМ-ЛОГИКА + движок в
   questions.go               — question.asked: вопрос с опциями, "свой ответ"
   format.go                  — markdown→HTML, разбивка на сообщения ≤4000
   *_test.go                  — юнит-тесты форматирования и статусов
-internal/opencode/client.go  — тонкий HTTP-клиент к opencode-server:
-                               /global/health, /session, /session/{id}/message,
-                               /abort, /permissions, /question/{id}/reply, /event (SSE)
+internal/backend/client.go   — тонкий HTTP+WS-клиент к opencode-backend (шлюз):
+                               Health, CreateSession, SendMessage (async → messageID),
+                               Abort, Get/Delete, ReplyPermission, ReplyQuestion,
+                               UploadFile (multipart), Events (WebSocket)
+internal/backend/types.go    — типы шлюза: Event, Message, Session, PermissionAsked,
+                               QuestionAsked, MessageRequest и пр.
 internal/whisper/client.go   — gRPC-клиент к сервису транскрибации (async-джобы)
 internal/config/config.go    — конфиг из env
 gen/whisper/                 — сгенерированные proto-стабы (не редактировать руками)
@@ -64,23 +76,33 @@ scripts/entrypoint.sh        — задаёт git identity в контейнер
 agents/                      — документы для дальнейшей работы (планы, фичи, решения)
 ```
 
+`internal/opencode` в боте больше нет: вся работа с opencode-server идёт через
+шлюз `opencode-backend` (`internal/backend`). Код шлюза живёт отдельно — в
+`/home/maxim/projects/backends/opencode-backend`.
+
 ## Ключевые понятия
 
 - **Сессия** — одна глобальная сессия opencode на весь бот (`b.sessionID`),
-  создаётся лениво при первом сообщении, сбрасывается командой `/reset`.
+  живёт на шлюзе (создаётся лениво при первом сообщении через
+  `POST /api/v1/sessions`, сбрасывается командой `/reset`). После рестарта
+  бота сессия переживает: id восстанавливается из шлюза.
 - **Busy-флаг** — `tryAcquire()/release()`: пока запрос в полёте, новый
-  отклоняется («⏳ Подожди, я ещё думаю…»). Конкурентности внутри бота нет.
+  отклоняется («⏳ Подожди, я ещё думаю…»). Конкурентности внутри бота нет;
+  дополнительно шлюз режет конкурентные запросы в одну сессию (409).
 - **Stream** — состояние текущего запроса (partial, reasoning, статусы/лог
-  тул-вызовов), наполняется из SSE, рендерится в «💭»-placeholder каждые 1.2s.
-- **SSE event loop** — `b.eventLoop` держит единственную подписку на `/event`
-  с реконнектом. Обрабатываются типы: `message.part.updated`,
-  `permission.asked`, `question.asked`.
-- **Permissions** — режимы `PERMISSION_MODE`: `ask` (кнопки ✅ один раз /
+  тул-вызовов), наполняется из WS-событий, рендерится в «💭»-placeholder
+  каждые 1.2s. Финализируется из `message.updated` идемпотентно
+  (`finalizeOnce`), освобождая busy-флаг ровно один раз.
+- **WS event loop** — `b.eventLoop` держит единственную подписку на
+  `/api/v1/ws?session=*` с реконнектом. Обрабатываются типы:
+  `message.part.updated`, `message.updated`, `permission.asked`,
+  `question.asked`.
+- **Permissions** — режимы `PERMISSION_MODE` (на шлюзе): `ask` (кнопки ✅ один раз /
   🟢 всегда / ❌ отклонить), `allow`, `deny`. Соответствие `permissionID`
-  → вопрос в `b.perms`.
+  → вопрос в `b.perms`, ответ уходит в `POST /api/v1/sessions/{id}/permissions/{pid}`.
 - **Questions** — вопросы агента (инструмент `question`): серия вопросов с
   опциями, отвечается по одному, ответы аккумулируются и отправляются разом
-  в `/question/{id}/reply`.
+  в `POST /api/v1/questions/{id}/reply`.
 
 ## Конфигурация (env)
 
@@ -90,14 +112,15 @@ agents/                      — документы для дальнейшей 
 |---|---|
 | `BOT_TOKEN` | токен Telegram-бота (обязателен) |
 | `ROOT_ID` | telegram user ID единственного авторизованного пользователя (обязателен) |
-| `OPENCODE_BASE_URL` | URL opencode-сервера (`http://opencode-server:4096` в docker) |
-| `OPENCODE_USERNAME/PASSWORD` | Basic-auth к серверу |
+| `BACKEND_BASE_URL` | URL шлюза opencode-backend (`http://opencode-backend:8080` в docker) |
+| `BACKEND_TOKEN` | токен шлюза = `ADMIN_TOKEN` сервиса opencode-backend (обязателен) |
 | `OPENCODE_MODEL` | модель по умолчанию (пусто = серверная) |
 | `OPENCODE_AGENT` | агент по умолчанию (default `build`) |
 | `PERMISSION_MODE` | `ask` / `allow` / `deny` (default `ask`) |
 | `OPENCODE_REQUEST_TIMEOUT` | таймаут одного запроса (default `30m`) |
 | `TELEGRAM_LOCAL_API_URL` | локальный Telegram Bot API (пусто = api.telegram.org) |
 | `WHISPER_GRPC_HOST/PORT` | сервис транскрибации (пусто = голос отключён) |
+| `OPENCODE_USERNAME/PASSWORD` | Basic-auth к opencode-server (использует шлюз, а не бот) |
 | `GIT_USER_NAME/EMAIL` | git identity агента (в сервере) |
 
 ## Команды
@@ -116,7 +139,7 @@ agents/                      — документы для дальнейшей 
 ## Конвенции
 
 - Go 1.26, модуль `opencode-bot`. Сторонних веб-фреймворков не добавляем.
-- `internal/opencode` — только HTTP-обёртка над opencode API, без логики
+- `internal/backend` — только HTTP+WS-обёртка над opencode-backend, без логики
   Telegram. Telegram-специфика — только в `internal/bot`.
 - Сгенерированные файлы (`gen/whisper`) руками не править.
 - Ответы пользователю — на русском, эмодзи допустимы (существующий стиль).
@@ -129,7 +152,8 @@ agents/                      — документы для дальнейшей 
 2. **Один авторизованный пользователь** — проверка `msg.From.ID != ROOT_ID`.
 3. **Вся «инженерия» зашита в `internal/bot`** — нельзя переиспользовать
    движок (сессии, стриминг, permissions, questions) для другого фронтенда.
-4. Состояние в памяти — после рестарта сессия теряется.
+4. Состояние бота в памяти; сессия живёт на шлюзе (переживает рестарт бота,
+   но не рестарт шлюза).
 5. `internal/bot/update.go:47` — `answerQuestionText` перехватывает любой
    текст как ответ на вопрос (нет явного разделения).
 6. Нет rate-limiting, квот, логов запросов, метрик.
@@ -138,5 +162,6 @@ agents/                      — документы для дальнейшей 
 
 Направление развития — **backend-шлюз** как единая точка взаимодействия с
 opencode (сессии, стриминг, permissions, questions), с несколькими
-фронтендами (Telegram, web, приложение). Подробнее и задачи — в
-[`agents/`](agents/README.md).
+фронтендами (Telegram, web, приложение). Шлюз уже реализован в
+`opencode-backend`; в этом репозитории бот — один из фронтендов.
+Подробнее и задачи — в [`agents/`](agents/README.md).
