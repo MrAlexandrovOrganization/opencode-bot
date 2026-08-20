@@ -84,7 +84,8 @@ func New(api *telego.Bot, backendClient *backend.Client, whisperClient *whisper.
 
 // ── Session management ───────────────────────────────────────────────────────
 
-// sessionIDFor returns the current opencode session, creating one lazily.
+// sessionIDFor returns the current opencode session, reusing an existing empty
+// session (после рестарта бота) or creating a new one lazily.
 func (b *Bot) sessionIDFor(ctx context.Context) (string, error) {
 	b.mu.Lock()
 	id := b.sessionID
@@ -92,7 +93,38 @@ func (b *Bot) sessionIDFor(ctx context.Context) (string, error) {
 	if id != "" {
 		return id, nil
 	}
+	if id, ok := b.reuseEmptySession(ctx); ok {
+		return id, nil
+	}
 	return b.newSession(ctx)
+}
+
+// reuseEmptySession переиспользует существующую пустую сессию (без сообщений),
+// чтобы после рестарта бота не плодить новые сессии. Среди пустых выбирает
+// самую свежую; вернёт ok=false, если подходящей нет или шлюз недоступен.
+func (b *Bot) reuseEmptySession(ctx context.Context) (string, bool) {
+	sessions, err := b.backend.ListSessions(ctx)
+	if err != nil {
+		slog.Warn("list sessions for reuse", "error", err)
+		return "", false
+	}
+	// Сессии отсортированы по CreatedAt (возрастание) — идём от самых свежих.
+	for i := len(sessions) - 1; i >= 0; i-- {
+		sess := sessions[i]
+		msgs, err := b.backend.ListMessages(ctx, sess.ID)
+		if err != nil {
+			continue
+		}
+		if len(msgs) > 0 {
+			continue
+		}
+		b.mu.Lock()
+		b.sessionID = sess.ID
+		b.mu.Unlock()
+		slog.Info("reusing empty session", "id", sess.ID, "directory", sess.Directory)
+		return sess.ID, true
+	}
+	return "", false
 }
 
 func (b *Bot) newSession(ctx context.Context) (string, error) {

@@ -52,6 +52,21 @@ func (c *Client) GetSession(ctx context.Context, id string) (*Session, error) {
 	return &out, err
 }
 
+// ListSessions возвращает сессии пользователя (для переиспользования пустых).
+func (c *Client) ListSessions(ctx context.Context) ([]Session, error) {
+	var out []Session
+	_, err := c.do(ctx, http.MethodGet, "/api/v1/sessions", nil, &out, http.StatusOK)
+	return out, err
+}
+
+// ListMessages возвращает сообщения сессии. Пустая сессия — та, у которой
+// сообщений нет.
+func (c *Client) ListMessages(ctx context.Context, sessionID string) ([]StoredMessage, error) {
+	var out []StoredMessage
+	_, err := c.do(ctx, http.MethodGet, "/api/v1/sessions/"+sessionID+"/messages", nil, &out, http.StatusOK)
+	return out, err
+}
+
 // GetMessage возвращает сообщение из истории шлюза.
 func (c *Client) GetMessage(ctx context.Context, sessionID, messageID string) (*StoredMessage, error) {
 	var out StoredMessage

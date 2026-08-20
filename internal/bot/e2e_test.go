@@ -141,10 +141,13 @@ type fakeBackend struct {
 	t   *testing.T
 	srv *httptest.Server
 
-	mu     sync.Mutex
-	gotMsg []backend.MessageRequest // принятые send-message запросы
-	stored map[string]string        // messageID -> тело StoredMessage (JSON)
-	replQ  [][][]string             // принятые answers на вопрос
+	mu       sync.Mutex
+	gotMsg   []backend.MessageRequest // принятые send-message запросы
+	stored   map[string]string        // messageID -> тело StoredMessage (JSON)
+	replQ    [][][]string             // принятые answers на вопрос
+	created  int                      // сколько раз создавалась сессия
+	sessions []backend.Session        // выдаются в GET /api/v1/sessions
+	msgCount map[string]int           // sessionID -> число сообщений
 
 	pushCh  chan []byte
 	wsReady chan struct{}
@@ -153,13 +156,16 @@ type fakeBackend struct {
 
 func newFakeBackend(t *testing.T) *fakeBackend {
 	fb := &fakeBackend{
-		t:       t,
-		pushCh:  make(chan []byte, 32),
-		wsReady: make(chan struct{}),
-		stored:  map[string]string{},
+		t:        t,
+		pushCh:   make(chan []byte, 32),
+		wsReady:  make(chan struct{}),
+		stored:   map[string]string{},
+		msgCount: map[string]int{},
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v1/sessions", fb.handleCreateSession)
+	mux.HandleFunc("GET /api/v1/sessions", fb.handleListSessions)
+	mux.HandleFunc("GET /api/v1/sessions/{id}/messages", fb.handleListMessages)
 	mux.HandleFunc("POST /api/v1/sessions/"+testSessID+"/messages", fb.handleSendMessage)
 	mux.HandleFunc("GET /api/v1/sessions/"+testSessID+"/messages/asm1", fb.handleGetMessage)
 	mux.HandleFunc("GET /api/v1/ws", fb.handleWS)
@@ -172,6 +178,31 @@ func newFakeBackend(t *testing.T) *fakeBackend {
 	return fb
 }
 
+func (fb *fakeBackend) handleListSessions(w http.ResponseWriter, r *http.Request) {
+	fb.mu.Lock()
+	sess := fb.sessions
+	fb.mu.Unlock()
+	writeJSON(w, sess)
+}
+
+func (fb *fakeBackend) handleListMessages(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	fb.mu.Lock()
+	n := fb.msgCount[id]
+	fb.mu.Unlock()
+	var out []map[string]any
+	for i := 0; i < n; i++ {
+		out = append(out, map[string]any{"id": "m" + id + string(rune('a'+i))})
+	}
+	writeJSON(w, out)
+}
+
+func (fb *fakeBackend) createdSessions() int {
+	fb.mu.Lock()
+	defer fb.mu.Unlock()
+	return fb.created
+}
+
 func (fb *fakeBackend) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get("Authorization") != "Bearer test-token" {
 		w.WriteHeader(http.StatusUnauthorized)
@@ -179,6 +210,9 @@ func (fb *fakeBackend) handleCreateSession(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	w.WriteHeader(http.StatusCreated)
+	fb.mu.Lock()
+	fb.created++
+	fb.mu.Unlock()
 	writeJSON(w, map[string]any{
 		"id": testSessID, "title": "telegram-bot", "directory": "/workspace",
 		"createdAt": time.Now().UTC().Format(time.RFC3339),
