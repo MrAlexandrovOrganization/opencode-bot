@@ -32,11 +32,10 @@ services:
       - /home/maxim/.config/opencode:/mnt/config
       - /home/maxim/.local/share/opencode:/mnt/data
       - /home/maxim/.cache/opencode:/mnt/cache
-      # Optional deploy key for git push (раскомментируй и укажи путь на
-      # хосте). Ключ должен быть без парольной фразы и давать write-доступ
-      # к нужным репозиториям. Путь внутри контейнера задай в
-      # GIT_DEPLOY_KEY_PATH (см. .env.example).
-      # - /home/maxim/.ssh/opencode_deploy_id_ed25519:/run/secrets/git_deploy_id_ed25519:ro
+      # Deploy-ключ для git push в GitHub. Ключ на хосте — ~/.ssh/github
+      # (без парольной фразы, даёт write-доступ к нужным репозиториям).
+      # Путь внутри контейнера задаётся в GIT_DEPLOY_KEY_PATH (см. .env).
+      - /home/maxim/.ssh/github:/run/secrets/git_deploy_id_ed25519:ro
     networks:
       - whisper-net
     extends:
