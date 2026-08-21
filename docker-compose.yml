@@ -15,6 +15,13 @@ services:
       # Git identity for the agent (git commit), from .env.
       GIT_USER_NAME: ${GIT_USER_NAME:-}
       GIT_USER_EMAIL: ${GIT_USER_EMAIL:-}
+      # Optional GitHub push access for the agent (see scripts/entrypoint.sh):
+      #   GIT_DEPLOY_KEY_PATH — путь к смонтированному SSH deploy-ключу (без
+      #     пароля) внутри контейнера; см. закомментированный volume ниже.
+      #   GH_TOKEN — GitHub PAT (fine-grained, contents:write на репозитории);
+      #     переписывает git-URL на HTTPS, SSH не требуется.
+      GIT_DEPLOY_KEY_PATH: ${GIT_DEPLOY_KEY_PATH:-}
+      GH_TOKEN: ${GH_TOKEN:-}
     volumes:
       # Read-only access to the whole home directory ("читай почти всё").
       - /home/maxim:/home/maxim:ro
@@ -25,6 +32,11 @@ services:
       - /home/maxim/.config/opencode:/mnt/config
       - /home/maxim/.local/share/opencode:/mnt/data
       - /home/maxim/.cache/opencode:/mnt/cache
+      # Optional deploy key for git push (раскомментируй и укажи путь на
+      # хосте). Ключ должен быть без парольной фразы и давать write-доступ
+      # к нужным репозиториям. Путь внутри контейнера задай в
+      # GIT_DEPLOY_KEY_PATH (см. .env.example).
+      # - /home/maxim/.ssh/opencode_deploy_id_ed25519:/run/secrets/git_deploy_id_ed25519:ro
     networks:
       - whisper-net
     extends:
