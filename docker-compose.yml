@@ -116,6 +116,10 @@ services:
     networks:
       - telegram-net
       - whisper-net
+    # Локальный Bot API-сервер хранит скачанные файлы (голос/видео/доки) на
+    # диске; читаем их напрямую, минуя 404 от /file/ в --local режиме.
+    volumes:
+      - telegram-bot-api-data:/var/lib/telegram-bot-api:ro
     extends:
       file: docker-compose.base.yml
       service: base
@@ -126,3 +130,8 @@ networks:
   whisper-net:
     external: true
     name: whisper-net
+
+volumes:
+  telegram-bot-api-data:
+    external: true
+    name: telegram-bot-api-data

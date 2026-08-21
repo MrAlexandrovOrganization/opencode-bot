@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -433,6 +434,18 @@ func (b *Bot) downloadFile(ctx context.Context, fileID string) ([]byte, error) {
 	}
 	if file.FilePath == "" {
 		return nil, fmt.Errorf("get file info: пустой путь к файлу")
+	}
+
+	// Локальный Bot API-сервер (TELEGRAM_LOCAL_API_URL, --local режим) хранит
+	// скачанные файлы на диске. HTTP-эндпоинт /file/ в этом режиме отдаёт 404,
+	// поэтому, как в transcriber-bot, читаем файл напрямую со смонтированного
+	// volume (telegram-bot-api-data → /var/lib/telegram-bot-api).
+	if b.cfg != nil && b.cfg.TelegramLocalAPIURL != "" {
+		if data, rerr := os.ReadFile(file.FilePath); rerr == nil {
+			return data, nil
+		} else {
+			slog.Warn("локальное чтение файла не удалось, пробуем HTTP", "path", file.FilePath, "error", rerr)
+		}
 	}
 
 	urls := []string{b.api.FileDownloadURL(file.FilePath)}
