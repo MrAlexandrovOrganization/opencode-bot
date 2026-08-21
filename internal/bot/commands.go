@@ -82,7 +82,16 @@ func (b *Bot) cmdHelp(msg *telego.Message) {
 
 func (b *Bot) cmdReset(msg *telego.Message) {
 	ctx := context.Background()
-	if old := b.currentSessionID(); old != "" {
+	old := b.currentSessionID()
+	if old != "" {
+		// Если текущая сессия пустая (в неё ещё не отправляли сообщений),
+		// не плодим новую пустую — оставляем текущую.
+		empty, err := b.backend.IsSessionEmpty(ctx, old)
+		if err == nil && empty {
+			b.send(msg.Chat.ID,
+				fmt.Sprintf("Сессия <code>%s</code> пустая — новая не создана.", escapeHTML(old)))
+			return
+		}
 		_ = b.backend.DeleteSession(ctx, old)
 	}
 	id, err := b.newSession(ctx)

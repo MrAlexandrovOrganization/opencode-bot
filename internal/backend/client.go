@@ -89,6 +89,16 @@ func (c *Client) GetMessage(ctx context.Context, sessionID, messageID string) (*
 	return &out, err
 }
 
+// IsSessionEmpty возвращает true, если в сессии нет сообщений. Используется
+// /reset, чтобы не плодить новые пустые сессии.
+func (c *Client) IsSessionEmpty(ctx context.Context, sessionID string) (bool, error) {
+	var out struct {
+		Empty bool `json:"empty"`
+	}
+	_, err := c.do(ctx, http.MethodGet, "/api/v1/sessions/"+sessionID+"/empty", nil, &out, http.StatusOK)
+	return out.Empty, err
+}
+
 // DeleteSession удаляет сессию.
 func (c *Client) DeleteSession(ctx context.Context, id string) error {
 	_, err := c.do(ctx, http.MethodDelete, "/api/v1/sessions/"+id, nil, nil, http.StatusNoContent)

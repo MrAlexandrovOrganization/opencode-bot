@@ -150,6 +150,7 @@ type fakeBackend struct {
 	msgCount map[string]int           // sessionID -> число сообщений
 	resumed  []string                 // вызванные POST /resume
 	renamed  map[string]string        // sessionID -> новый title
+	deleted  []string                 // вызванные DELETE /sessions/{id}
 
 	pushCh  chan []byte
 	wsReady chan struct{}
@@ -169,6 +170,8 @@ func newFakeBackend(t *testing.T) *fakeBackend {
 	mux.HandleFunc("GET /api/v1/sessions", fb.handleListSessions)
 	mux.HandleFunc("POST /api/v1/sessions/{id}/resume", fb.handleResumeSession)
 	mux.HandleFunc("PATCH /api/v1/sessions/{id}", fb.handleRenameSession)
+	mux.HandleFunc("GET /api/v1/sessions/{id}/empty", fb.handleSessionEmpty)
+	mux.HandleFunc("DELETE /api/v1/sessions/{id}", fb.handleDeleteSession)
 	mux.HandleFunc("GET /api/v1/sessions/{id}/messages", fb.handleListMessages)
 	mux.HandleFunc("POST /api/v1/sessions/"+testSessID+"/messages", fb.handleSendMessage)
 	mux.HandleFunc("GET /api/v1/sessions/"+testSessID+"/messages/asm1", fb.handleGetMessage)
@@ -199,6 +202,22 @@ func (fb *fakeBackend) handleListMessages(w http.ResponseWriter, r *http.Request
 		out = append(out, map[string]any{"id": "m" + id + string(rune('a'+i))})
 	}
 	writeJSON(w, out)
+}
+
+func (fb *fakeBackend) handleSessionEmpty(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	fb.mu.Lock()
+	n := fb.msgCount[id]
+	fb.mu.Unlock()
+	writeJSON(w, map[string]bool{"empty": n == 0})
+}
+
+func (fb *fakeBackend) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	fb.mu.Lock()
+	fb.deleted = append(fb.deleted, id)
+	fb.mu.Unlock()
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (fb *fakeBackend) createdSessions() int {
@@ -262,6 +281,12 @@ func (fb *fakeBackend) resumedSessions() []string {
 	fb.mu.Lock()
 	defer fb.mu.Unlock()
 	return append([]string(nil), fb.resumed...)
+}
+
+func (fb *fakeBackend) deletedSessions() []string {
+	fb.mu.Lock()
+	defer fb.mu.Unlock()
+	return append([]string(nil), fb.deleted...)
 }
 
 func (fb *fakeBackend) renamedSession(id string) string {

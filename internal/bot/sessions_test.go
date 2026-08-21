@@ -235,3 +235,69 @@ func TestCmdRenameWithoutArgsShowsUsage(t *testing.T) {
 
 	ft.waitText(t, "Формат:")
 }
+
+// ── /reset не плодит пустые сессии ───────────────────────────────────────────
+
+// TestResetEmptySessionReused — /reset на пустой (без сообщений) текущей
+// сессии не создаёт новую и не удаляет старую, а оставляет текущую.
+func TestResetEmptySessionReused(t *testing.T) {
+	ft := newFakeTelegram(t)
+	fb := newFakeBackend(t)
+	b := newTestBot(t, ft, fb)
+	b.mu.Lock()
+	b.sessionID = "sess_empty"
+	b.mu.Unlock()
+	fb.msgCount["sess_empty"] = 0
+
+	b.handleUpdate(textUpdate("/reset"))
+
+	ft.waitText(t, "пустая")
+	if n := fb.createdSessions(); n != 0 {
+		t.Fatalf("создано сессий %d, а пустая должна переиспользоваться", n)
+	}
+	if got := fb.deletedSessions(); len(got) != 0 {
+		t.Fatalf("удалена(ы) сессия(и): %v, пустая не должна удаляться", got)
+	}
+	if b.currentSessionID() != "sess_empty" {
+		t.Fatalf("currentSessionID = %q, хотим sess_empty", b.currentSessionID())
+	}
+}
+
+// TestResetNonEmptySessionReplaced — /reset на непустой сессии удаляет её и
+// создаёт новую.
+func TestResetNonEmptySessionReplaced(t *testing.T) {
+	ft := newFakeTelegram(t)
+	fb := newFakeBackend(t)
+	b := newTestBot(t, ft, fb)
+	b.mu.Lock()
+	b.sessionID = "sess_used"
+	b.mu.Unlock()
+	fb.msgCount["sess_used"] = 3
+
+	b.handleUpdate(textUpdate("/reset"))
+
+	ft.waitText(t, "Новая сессия создана")
+	if got := fb.deletedSessions(); len(got) != 1 || got[0] != "sess_used" {
+		t.Fatalf("удалено: %v, хотим [sess_used]", got)
+	}
+	if n := fb.createdSessions(); n != 1 {
+		t.Fatalf("создано сессий %d, хотим 1", n)
+	}
+}
+
+// TestResetNoSessionCreates — /reset без текущей сессии создаёт новую.
+func TestResetNoSessionCreates(t *testing.T) {
+	ft := newFakeTelegram(t)
+	fb := newFakeBackend(t)
+	b := newTestBot(t, ft, fb)
+
+	b.handleUpdate(textUpdate("/reset"))
+
+	ft.waitText(t, "Новая сессия создана")
+	if n := fb.createdSessions(); n != 1 {
+		t.Fatalf("создано сессий %d, хотим 1", n)
+	}
+	if got := fb.deletedSessions(); len(got) != 0 {
+		t.Fatalf("удалено лишнее: %v", got)
+	}
+}
