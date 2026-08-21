@@ -148,6 +148,8 @@ type fakeBackend struct {
 	created  int                      // сколько раз создавалась сессия
 	sessions []backend.Session        // выдаются в GET /api/v1/sessions
 	msgCount map[string]int           // sessionID -> число сообщений
+	resumed  []string                 // вызванные POST /resume
+	renamed  map[string]string        // sessionID -> новый title
 
 	pushCh  chan []byte
 	wsReady chan struct{}
@@ -165,6 +167,8 @@ func newFakeBackend(t *testing.T) *fakeBackend {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v1/sessions", fb.handleCreateSession)
 	mux.HandleFunc("GET /api/v1/sessions", fb.handleListSessions)
+	mux.HandleFunc("POST /api/v1/sessions/{id}/resume", fb.handleResumeSession)
+	mux.HandleFunc("PATCH /api/v1/sessions/{id}", fb.handleRenameSession)
 	mux.HandleFunc("GET /api/v1/sessions/{id}/messages", fb.handleListMessages)
 	mux.HandleFunc("POST /api/v1/sessions/"+testSessID+"/messages", fb.handleSendMessage)
 	mux.HandleFunc("GET /api/v1/sessions/"+testSessID+"/messages/asm1", fb.handleGetMessage)
@@ -201,6 +205,69 @@ func (fb *fakeBackend) createdSessions() int {
 	fb.mu.Lock()
 	defer fb.mu.Unlock()
 	return fb.created
+}
+
+// session возвращает копию сессии из списка или nil.
+func (fb *fakeBackend) session(id string) *backend.Session {
+	for i := range fb.sessions {
+		if fb.sessions[i].ID == id {
+			s := fb.sessions[i]
+			return &s
+		}
+	}
+	return nil
+}
+
+func (fb *fakeBackend) handleResumeSession(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	fb.mu.Lock()
+	fb.resumed = append(fb.resumed, id)
+	sess := fb.session(id)
+	fb.mu.Unlock()
+	if sess == nil {
+		writeJSON(w, map[string]any{"error": "сессия не найдена"})
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	writeJSON(w, sess)
+}
+
+func (fb *fakeBackend) handleRenameSession(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var body struct {
+		Title string `json:"title"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	fb.mu.Lock()
+	if fb.renamed == nil {
+		fb.renamed = map[string]string{}
+	}
+	fb.renamed[id] = body.Title
+	for i := range fb.sessions {
+		if fb.sessions[i].ID == id {
+			fb.sessions[i].Title = body.Title
+		}
+	}
+	sess := fb.session(id)
+	fb.mu.Unlock()
+	if sess == nil {
+		writeJSON(w, map[string]any{"error": "сессия не найдена"})
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	writeJSON(w, sess)
+}
+
+func (fb *fakeBackend) resumedSessions() []string {
+	fb.mu.Lock()
+	defer fb.mu.Unlock()
+	return append([]string(nil), fb.resumed...)
+}
+
+func (fb *fakeBackend) renamedSession(id string) string {
+	fb.mu.Lock()
+	defer fb.mu.Unlock()
+	return fb.renamed[id]
 }
 
 func (fb *fakeBackend) handleCreateSession(w http.ResponseWriter, r *http.Request) {

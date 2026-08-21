@@ -24,6 +24,10 @@ func (b *Bot) handleCommand(cmd string, msg *telego.Message) {
 		b.cmdReset(msg)
 	case "session":
 		b.cmdSession(msg)
+	case "sessions":
+		b.cmdSessions(msg)
+	case "rename":
+		b.cmdRename(msg)
 	case "abort":
 		b.cmdAbort(msg)
 	case "model":
@@ -52,6 +56,8 @@ func (b *Bot) cmdHelp(msg *telego.Message) {
 /help — этот список
 /reset — начать новую сессию opencode
 /session — информация о текущей сессии
+/sessions — список сессий и переключение между ними
+/rename <i>[название]</i> — переименовать текущую сессию
 /abort — прервать текущий запрос
 /model <i>[provider/model]</i> — показать или задать модель
 /agent <i>[name]</i> — показать или задать агента (build, plan, general, explore)
@@ -115,7 +121,8 @@ func (b *Bot) cmdSession(msg *telego.Message) {
 			"📁 <code>%s</code>\n"+
 			"🤖 <b>Агент:</b> %s\n"+
 			"⚙️ <b>Модель:</b> %s\n"+
-			"🕐 <b>Создана:</b> %s",
+			"🕐 <b>Создана:</b> %s\n\n"+
+			"Переключиться между сессиями — /sessions, переименовать — /rename",
 		escapeHTML(s.ID),
 		escapeHTML(s.Directory),
 		escapeHTML(agent),

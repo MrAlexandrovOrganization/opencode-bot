@@ -65,6 +65,9 @@ services:
       # Токен, которым бот (и другие фронтенды) ходит в шлюз.
       ADMIN_TOKEN: ${BACKEND_TOKEN:-}
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      # SQLite-файл истории сессий/сообщений (пусто = in-memory). Лежит в
+      # /workspace (внешний маунт) — переживает рестарт и шлюза, и бота.
+      DB_PATH: /workspace/.opencode-backend/opencode-backend.db
     volumes:
       - /home/maxim/projects:/workspace
     networks:

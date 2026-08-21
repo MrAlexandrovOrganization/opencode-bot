@@ -81,6 +81,10 @@ func (b *Bot) handleCallback(query *telego.CallbackQuery) {
 		b.handleQuestionAnswer(query)
 		return
 	}
+	if strings.HasPrefix(query.Data, "sess:") {
+		b.handleSessionSwitch(query)
+		return
+	}
 	parts := strings.SplitN(query.Data, ":", 3)
 	if len(parts) != 3 || parts[0] != "perm" {
 		return

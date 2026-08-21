@@ -52,6 +52,21 @@ func (c *Client) GetSession(ctx context.Context, id string) (*Session, error) {
 	return &out, err
 }
 
+// ResumeSession активирует существующую сессию на шлюзе (переключение фронтенда
+// на другую сессию, в том числе пережившую рестарт шлюза).
+func (c *Client) ResumeSession(ctx context.Context, id string) (*Session, error) {
+	var out Session
+	_, err := c.do(ctx, http.MethodPost, "/api/v1/sessions/"+id+"/resume", nil, &out, http.StatusOK)
+	return &out, err
+}
+
+// RenameSession переименовывает сессию (title для списка сессий).
+func (c *Client) RenameSession(ctx context.Context, id, title string) (*Session, error) {
+	var out Session
+	_, err := c.do(ctx, http.MethodPatch, "/api/v1/sessions/"+id, map[string]string{"title": title}, &out, http.StatusOK)
+	return &out, err
+}
+
 // ListSessions возвращает сессии пользователя (для переиспользования пустых).
 func (c *Client) ListSessions(ctx context.Context) ([]Session, error) {
 	var out []Session
