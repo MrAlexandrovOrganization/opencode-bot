@@ -420,12 +420,42 @@ func (b *Bot) handleAudio(msg *telego.Message) {
 // ── File helpers ─────────────────────────────────────────────────────────────
 
 // downloadFile fetches a Telegram file by its file ID.
+//
+// Сначала пробуем скачать через сконфигурированный Bot API (локальный сервер
+// при TELEGRAM_LOCAL_API_URL). Если он отдаёт 404 (типично для локального
+// Bot API в --local-режиме, когда файл не попал в локальное хранилище, либо
+// локальный сервер — просто прокси, а файл лежит в облаке), повторяем
+// запрос напрямую к api.telegram.org.
 func (b *Bot) downloadFile(ctx context.Context, fileID string) ([]byte, error) {
 	file, err := b.api.GetFile(ctx, &telego.GetFileParams{FileID: fileID})
 	if err != nil {
 		return nil, fmt.Errorf("get file info: %w", err)
 	}
-	url := b.api.FileDownloadURL(file.FilePath)
+	if file.FilePath == "" {
+		return nil, fmt.Errorf("get file info: пустой путь к файлу")
+	}
+
+	urls := []string{b.api.FileDownloadURL(file.FilePath)}
+	if b.cfg != nil && b.cfg.TelegramLocalAPIURL != "" &&
+		!strings.HasPrefix(strings.ToLower(b.cfg.TelegramLocalAPIURL), "https://api.telegram.org") {
+		urls = append(urls, "https://api.telegram.org/file/bot"+b.api.Token()+"/"+file.FilePath)
+	}
+
+	var lastErr error
+	for _, url := range urls {
+		data, derr := b.downloadFromURL(ctx, url)
+		if derr == nil {
+			return data, nil
+		}
+		lastErr = derr
+		slog.Warn("скачивание файла не удалось", "url", url, "error", derr)
+	}
+	return nil, lastErr
+}
+
+// downloadFromURL выполняет GET-запрос и возвращает тело ответа либо ошибку
+// с HTTP-статусом при неуспехе.
+func (b *Bot) downloadFromURL(ctx context.Context, url string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build download request: %w", err)
