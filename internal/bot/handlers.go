@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -119,9 +120,23 @@ func (b *Bot) handleVoice(msg *telego.Message) {
 	}
 	slog.Info("voice received", "file_id", fileID, "bytes", len(data))
 
+	// Нормализуем аудио в WAV 16k mono через ffmpeg: faster-whisper (и его
+	// VAD-фильтр) надёжно декодирует PCM-WAV, тогда как «сырой» OGG/Opus от
+	// Telegram в ряде случаев падает с «End of file» при расшифровке.
+	audio := data
+	outFormat := format
+	if wav, werr := convertAudioToWAV(ctx, data); werr != nil {
+		slog.Warn("normalize audio failed, send as-is", "error", werr)
+	} else if len(wav) == 0 {
+		slog.Warn("normalize audio produced empty result, send as-is")
+	} else {
+		audio = wav
+		outFormat = "wav"
+	}
+
 	b.editMessage(ctx, msg.Chat.ID, statusMsg.MessageID, "⏳ Отправляю на расшифровку...")
 
-	text, err := b.transcribeVoice(ctx, data, format, msg.Chat.ID, statusMsg.MessageID)
+	text, err := b.transcribeVoice(ctx, audio, outFormat, msg.Chat.ID, statusMsg.MessageID)
 	if err != nil {
 		b.release()
 		slog.Error("transcribe", "error", err)
@@ -420,5 +435,29 @@ func (b *Bot) downloadFile(ctx context.Context, fileID string) ([]byte, error) {
 		return nil, fmt.Errorf("download: %w", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("download: неожиданный статус %d: %s", resp.StatusCode, string(body))
+	}
 	return io.ReadAll(resp.Body)
+}
+
+// convertAudioToWAV перегоняет скачанное аудио в WAV 16k mono через ffmpeg.
+// На вход принимает любой контейнер (OGG/Opus, MP4/AAC и т.п.), на выходе —
+// PCM-WAV, который faster-whisper декодирует без ошибок вида «End of file».
+func convertAudioToWAV(ctx context.Context, data []byte) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "ffmpeg",
+		"-hide_banner", "-loglevel", "error",
+		"-i", "pipe:0",
+		"-ar", "16000", "-ac", "1",
+		"-f", "wav", "pipe:1",
+	)
+	cmd.Stdin = bytes.NewReader(data)
+	var out, stderr bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("ffmpeg: %w: %s", err, stderr.String())
+	}
+	return out.Bytes(), nil
 }
