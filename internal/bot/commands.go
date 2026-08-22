@@ -81,6 +81,16 @@ func (b *Bot) cmdHelp(msg *telego.Message) {
 }
 
 func (b *Bot) cmdReset(msg *telego.Message) {
+	// Нельзя сбрасывать сессию, пока идёт запрос: удаление активной сессии
+	// посреди стрима сломало бы финализацию ответа.
+	b.mu.Lock()
+	busy := b.busy
+	b.mu.Unlock()
+	if busy {
+		b.send(msg.Chat.ID, "⏳ Дождись завершения текущего запроса, затем /reset.")
+		return
+	}
+
 	ctx := context.Background()
 	old := b.currentSessionID()
 	if old != "" {
@@ -92,13 +102,18 @@ func (b *Bot) cmdReset(msg *telego.Message) {
 				fmt.Sprintf("Сессия <code>%s</code> пустая — новая не создана.", escapeHTML(old)))
 			return
 		}
-		_ = b.backend.DeleteSession(ctx, old)
 	}
+
+	// Сначала создаём новую сессию, и только при успехе удаляем старую.
+	// Иначе при ошибке создания бот терял бы сессию (указывал на удалённую).
 	id, err := b.newSession(ctx)
 	if err != nil {
 		slog.Error("reset", "error", err)
 		b.send(msg.Chat.ID, "Не удалось создать сессию: "+err.Error())
 		return
+	}
+	if old != "" && old != id {
+		_ = b.backend.DeleteSession(ctx, old)
 	}
 	b.send(msg.Chat.ID, fmt.Sprintf("Новая сессия создана: <code>%s</code>", escapeHTML(id)))
 }
@@ -206,5 +221,7 @@ func escapeHTML(s string) string {
 	s = strings.ReplaceAll(s, "&", "&amp;")
 	s = strings.ReplaceAll(s, "<", "&lt;")
 	s = strings.ReplaceAll(s, ">", "&gt;")
+	s = strings.ReplaceAll(s, `"`, "&quot;")
+	s = strings.ReplaceAll(s, "'", "&#39;")
 	return s
 }

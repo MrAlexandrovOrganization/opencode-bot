@@ -33,45 +33,26 @@ func (b *Bot) newMessageRequest() backend.MessageRequest {
 // handleText processes a plain text message: sends it to the backend and
 // streams the response back into the placeholder.
 func (b *Bot) handleText(msg *telego.Message) {
-	if !b.tryAcquire() {
+	ctx, ok := b.beginRequest()
+	if !ok {
 		b.send(msg.Chat.ID, "⏳ Подожди, я ещё думаю...")
 		return
 	}
 	req := b.newMessageRequest()
 	req.AddText(msg.Text)
-	b.startRequest(context.Background(), msg.Chat.ID, req)
+	b.startRequest(ctx, msg.Chat.ID, req)
 }
 
 // handlePhoto downloads a photo, uploads it through the backend and sends it
 // to opencode. The caption (if any) is used as the user's question.
 func (b *Bot) handlePhoto(msg *telego.Message) {
-	if !b.tryAcquire() {
+	ctx, ok := b.beginRequest()
+	if !ok {
 		b.send(msg.Chat.ID, "⏳ Подожди, я ещё думаю...")
 		return
 	}
-
-	ctx := context.Background()
 	photo := msg.Photo[len(msg.Photo)-1]
-	data, err := b.downloadFile(ctx, photo.FileID)
-	if err != nil {
-		b.release()
-		b.send(msg.Chat.ID, "Не удалось скачать фото: "+err.Error())
-		return
-	}
-
-	url, err := b.backend.UploadFile(ctx, "photo.jpg", "image/jpeg", bytes.NewReader(data))
-	if err != nil {
-		b.release()
-		b.send(msg.Chat.ID, "Не удалось загрузить фото: "+err.Error())
-		return
-	}
-
-	req := b.newMessageRequest()
-	req.AddFile("image/jpeg", "photo.jpg", url)
-	if caption := strings.TrimSpace(msg.Caption); caption != "" {
-		req.AddText(caption)
-	}
-	b.startRequest(ctx, msg.Chat.ID, req)
+	b.sendAttachment(ctx, msg.Chat.ID, photo.FileID, "photo.jpg", "image/jpeg", msg.Caption)
 }
 
 // handleVoice transcribes a voice message or video note via the shared
@@ -88,12 +69,11 @@ func (b *Bot) handleVoice(msg *telego.Message) {
 		return
 	}
 
-	if !b.tryAcquire() {
+	ctx, ok := b.beginRequest()
+	if !ok {
 		b.send(msg.Chat.ID, "⏳ Подожди, я ещё думаю...")
 		return
 	}
-
-	ctx := context.Background()
 
 	var fileID, format string
 	switch {
@@ -220,21 +200,13 @@ func (b *Bot) transcribeVoice(ctx context.Context, data []byte, format string, c
 }
 
 // handleDocument downloads a document, uploads it through the backend and
-// attaches it as a file part.
+// attaches it as a file part. The caption (if any) is used as the question.
 func (b *Bot) handleDocument(msg *telego.Message) {
-	if !b.tryAcquire() {
+	ctx, ok := b.beginRequest()
+	if !ok {
 		b.send(msg.Chat.ID, "⏳ Подожди, я ещё думаю...")
 		return
 	}
-
-	ctx := context.Background()
-	data, err := b.downloadFile(ctx, msg.Document.FileID)
-	if err != nil {
-		b.release()
-		b.send(msg.Chat.ID, "Не удалось скачать документ: "+err.Error())
-		return
-	}
-
 	filename := msg.Document.FileName
 	if filename == "" {
 		filename = "document.bin"
@@ -243,76 +215,36 @@ func (b *Bot) handleDocument(msg *telego.Message) {
 	if mime == "" {
 		mime = "application/octet-stream"
 	}
-
-	url, err := b.backend.UploadFile(ctx, filename, mime, bytes.NewReader(data))
-	if err != nil {
-		b.release()
-		b.send(msg.Chat.ID, "Не удалось загрузить документ: "+err.Error())
-		return
-	}
-
-	req := b.newMessageRequest()
-	req.AddFile(mime, filename, url)
-	if caption := strings.TrimSpace(msg.Caption); caption != "" {
-		req.AddText(caption)
-	}
-	b.startRequest(ctx, msg.Chat.ID, req)
+	b.sendAttachment(ctx, msg.Chat.ID, msg.Document.FileID, filename, mime, msg.Caption)
 }
 
 // handleSticker downloads a sticker and uploads it through the backend as a
 // file attachment. The sticker format depends on its type: regular (webp),
 // animated (tgs), or video (webm).
 func (b *Bot) handleSticker(msg *telego.Message) {
-	if !b.tryAcquire() {
+	ctx, ok := b.beginRequest()
+	if !ok {
 		b.send(msg.Chat.ID, "⏳ Подожди, я ещё думаю...")
 		return
 	}
-
-	ctx := context.Background()
-	sticker := msg.Sticker
-	data, err := b.downloadFile(ctx, sticker.FileID)
-	if err != nil {
-		b.release()
-		b.send(msg.Chat.ID, "Не удалось скачать стикер: "+err.Error())
-		return
-	}
-
 	filename, mime := "sticker.webp", "image/webp"
 	switch {
-	case sticker.IsAnimated:
+	case msg.Sticker.IsAnimated:
 		filename, mime = "sticker.tgs", "application/x-tgsticker"
-	case sticker.IsVideo:
+	case msg.Sticker.IsVideo:
 		filename, mime = "sticker.webm", "video/webm"
 	}
-
-	url, err := b.backend.UploadFile(ctx, filename, mime, bytes.NewReader(data))
-	if err != nil {
-		b.release()
-		b.send(msg.Chat.ID, "Не удалось загрузить стикер: "+err.Error())
-		return
-	}
-
-	req := b.newMessageRequest()
-	req.AddFile(mime, filename, url)
-	b.startRequest(ctx, msg.Chat.ID, req)
+	b.sendAttachment(ctx, msg.Chat.ID, msg.Sticker.FileID, filename, mime, "")
 }
 
 // handleVideo downloads a video and uploads it through the backend as a
 // file attachment. The caption (if any) is used as the user's question.
 func (b *Bot) handleVideo(msg *telego.Message) {
-	if !b.tryAcquire() {
+	ctx, ok := b.beginRequest()
+	if !ok {
 		b.send(msg.Chat.ID, "⏳ Подожди, я ещё думаю...")
 		return
 	}
-
-	ctx := context.Background()
-	data, err := b.downloadFile(ctx, msg.Video.FileID)
-	if err != nil {
-		b.release()
-		b.send(msg.Chat.ID, "Не удалось скачать видео: "+err.Error())
-		return
-	}
-
 	filename := msg.Video.FileName
 	if filename == "" {
 		filename = "video.mp4"
@@ -321,39 +253,18 @@ func (b *Bot) handleVideo(msg *telego.Message) {
 	if mime == "" {
 		mime = "video/mp4"
 	}
-
-	url, err := b.backend.UploadFile(ctx, filename, mime, bytes.NewReader(data))
-	if err != nil {
-		b.release()
-		b.send(msg.Chat.ID, "Не удалось загрузить видео: "+err.Error())
-		return
-	}
-
-	req := b.newMessageRequest()
-	req.AddFile(mime, filename, url)
-	if caption := strings.TrimSpace(msg.Caption); caption != "" {
-		req.AddText(caption)
-	}
-	b.startRequest(ctx, msg.Chat.ID, req)
+	b.sendAttachment(ctx, msg.Chat.ID, msg.Video.FileID, filename, mime, msg.Caption)
 }
 
 // handleAnimation downloads an animation (GIF) and uploads it through the
 // backend as a file attachment. The caption (if any) is used as the user's
 // question.
 func (b *Bot) handleAnimation(msg *telego.Message) {
-	if !b.tryAcquire() {
+	ctx, ok := b.beginRequest()
+	if !ok {
 		b.send(msg.Chat.ID, "⏳ Подожди, я ещё думаю...")
 		return
 	}
-
-	ctx := context.Background()
-	data, err := b.downloadFile(ctx, msg.Animation.FileID)
-	if err != nil {
-		b.release()
-		b.send(msg.Chat.ID, "Не удалось скачать анимацию: "+err.Error())
-		return
-	}
-
 	filename := msg.Animation.FileName
 	if filename == "" {
 		filename = "animation.gif"
@@ -362,38 +273,17 @@ func (b *Bot) handleAnimation(msg *telego.Message) {
 	if mime == "" {
 		mime = "image/gif"
 	}
-
-	url, err := b.backend.UploadFile(ctx, filename, mime, bytes.NewReader(data))
-	if err != nil {
-		b.release()
-		b.send(msg.Chat.ID, "Не удалось загрузить анимацию: "+err.Error())
-		return
-	}
-
-	req := b.newMessageRequest()
-	req.AddFile(mime, filename, url)
-	if caption := strings.TrimSpace(msg.Caption); caption != "" {
-		req.AddText(caption)
-	}
-	b.startRequest(ctx, msg.Chat.ID, req)
+	b.sendAttachment(ctx, msg.Chat.ID, msg.Animation.FileID, filename, mime, msg.Caption)
 }
 
 // handleAudio downloads an audio file and uploads it through the backend as
 // a file attachment. The caption (if any) is used as the user's question.
 func (b *Bot) handleAudio(msg *telego.Message) {
-	if !b.tryAcquire() {
+	ctx, ok := b.beginRequest()
+	if !ok {
 		b.send(msg.Chat.ID, "⏳ Подожди, я ещё думаю...")
 		return
 	}
-
-	ctx := context.Background()
-	data, err := b.downloadFile(ctx, msg.Audio.FileID)
-	if err != nil {
-		b.release()
-		b.send(msg.Chat.ID, "Не удалось скачать аудио: "+err.Error())
-		return
-	}
-
 	filename := msg.Audio.FileName
 	if filename == "" {
 		filename = "audio.ogg"
@@ -402,20 +292,34 @@ func (b *Bot) handleAudio(msg *telego.Message) {
 	if mime == "" {
 		mime = "audio/ogg"
 	}
+	b.sendAttachment(ctx, msg.Chat.ID, msg.Audio.FileID, filename, mime, msg.Caption)
+}
+
+// sendAttachment скачивает файл из Telegram, загружает его через шлюз и
+// отправляет агенту как вложение. Подпись (caption) добавляется как текст
+// вопроса, если не пуста. busy-флаг освобождается только при успешном
+// старте запроса (finishStream) либо при ошибке скачивания/загрузки.
+func (b *Bot) sendAttachment(ctx context.Context, chatID int64, fileID, filename, mime, caption string) {
+	data, err := b.downloadFile(ctx, fileID)
+	if err != nil {
+		b.release()
+		b.send(chatID, "Не удалось скачать файл: "+err.Error())
+		return
+	}
 
 	url, err := b.backend.UploadFile(ctx, filename, mime, bytes.NewReader(data))
 	if err != nil {
 		b.release()
-		b.send(msg.Chat.ID, "Не удалось загрузить аудио: "+err.Error())
+		b.send(chatID, "Не удалось загрузить файл: "+err.Error())
 		return
 	}
 
 	req := b.newMessageRequest()
 	req.AddFile(mime, filename, url)
-	if caption := strings.TrimSpace(msg.Caption); caption != "" {
+	if caption := strings.TrimSpace(caption); caption != "" {
 		req.AddText(caption)
 	}
-	b.startRequest(ctx, msg.Chat.ID, req)
+	b.startRequest(ctx, chatID, req)
 }
 
 // ── File helpers ─────────────────────────────────────────────────────────────
@@ -473,7 +377,7 @@ func (b *Bot) downloadFromURL(ctx context.Context, url string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("build download request: %w", err)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := b.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("download: %w", err)
 	}

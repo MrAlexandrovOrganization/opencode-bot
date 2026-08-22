@@ -51,6 +51,7 @@ lint:
 		gofmt -l ./cmd ./internal; \
 		exit 1; \
 	fi
+	go vet ./cmd/... ./internal/...
 
 .PHONY: test
 test:

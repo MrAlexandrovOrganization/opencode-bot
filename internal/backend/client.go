@@ -10,6 +10,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/coder/websocket"
 )
@@ -27,9 +28,17 @@ type Client struct {
 	http    *http.Client
 }
 
+// requestTimeout — максимальное время одного REST-запроса к шлюзу. Без него
+// (пустой http.Client) запрос мог бы висеть бесконечно при зависании сети.
+const requestTimeout = 120 * time.Second
+
 // New создаёт клиент шлюза. token — BACKEND_TOKEN (admin-токен шлюза).
 func New(baseURL, token string) *Client {
-	return &Client{baseURL: strings.TrimRight(baseURL, "/"), token: token, http: &http.Client{}}
+	return &Client{
+		baseURL: strings.TrimRight(baseURL, "/"),
+		token:   token,
+		http:    &http.Client{Timeout: requestTimeout},
+	}
 }
 
 // Health проверяет доступность шлюза.
