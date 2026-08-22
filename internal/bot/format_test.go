@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"opencode-bot/internal/backend"
 )
@@ -171,6 +172,27 @@ func TestSplitRunesUnicode(t *testing.T) {
 		if len([]rune(p)) > 3 {
 			t.Fatalf("piece %q has %d runes, want <=3", p, len([]rune(p)))
 		}
+	}
+}
+
+func TestTruncate(t *testing.T) {
+	// Короткая строка возвращается как есть.
+	if got := truncate("коротко"); got != "коротко" {
+		t.Errorf("truncate(short) = %q, want %q", got, "коротко")
+	}
+	// Много-байтовые руны не должны разрываться посередине: результат
+	// должен быть валидной UTF-8 строкой без ошибок декодирования.
+	long := "日本語のテキストが含まれる очень длинное сообщение " + strings.Repeat("x", 5000)
+	got := truncate(long)
+	wantLen := maxMessageLen
+	if len([]rune(got)) != wantLen {
+		t.Errorf("truncate() length = %d runes, want %d", len([]rune(got)), wantLen)
+	}
+	if !strings.HasSuffix(got, "...") {
+		t.Errorf("truncate() should end with '...', got %q", got)
+	}
+	if !utf8.ValidString(got) {
+		t.Errorf("truncate() produced invalid UTF-8: %q", got)
 	}
 }
 

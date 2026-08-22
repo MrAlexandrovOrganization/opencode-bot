@@ -907,8 +907,9 @@ func unmarshalProps(ev backend.Event, out any) error {
 }
 
 func truncate(s string) string {
-	if len(s) <= maxMessageLen {
+	r := []rune(s)
+	if len(r) <= maxMessageLen {
 		return s
 	}
-	return s[:maxMessageLen-3] + "..."
+	return string(r[:maxMessageLen-3]) + "..."
 }
