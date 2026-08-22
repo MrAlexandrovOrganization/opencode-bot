@@ -44,7 +44,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1g
+          memory: 1.5g
           cpus: "1"
     healthcheck:
       test: ["CMD", "curl", "-fsS", "-u", "${OPENCODE_USERNAME:-opencode}:${OPENCODE_PASSWORD:-}", "http://localhost:4096/global/health"]
