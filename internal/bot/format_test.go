@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"opencode-bot/internal/backend"
 )
@@ -171,6 +172,104 @@ func TestSplitRunesUnicode(t *testing.T) {
 		if len([]rune(p)) > 3 {
 			t.Fatalf("piece %q has %d runes, want <=3", p, len([]rune(p)))
 		}
+	}
+}
+
+func TestSplitHTMLChunks(t *testing.T) {
+	// Большой блок с вложенными тегами и длинным текстом: не должен
+	// разрывать тег посередине и должен держать баланс тегов в каждом куске.
+	html := "<b>Заголовок</b>\n" + strings.Repeat("<i>очень длинный текст </i>подробности ", 200)
+	pieces := splitHTMLChunks(html, 400)
+	if len(pieces) < 2 {
+		t.Fatalf("ожидалось дробление на несколько кусков, получили %d", len(pieces))
+	}
+	for _, p := range pieces {
+		// Допускаем небольшой перерасход на переоткрывающие теги
+		// (<i> и т.п.), добавляемые в начало куска для баланса вложенности.
+		// В проде maxMessageLen=4000 при лимите Telegram 4096 это безопасно.
+		if len([]rune(p)) > 400+16 {
+			t.Errorf("кусок из %d рун превышает лимит 400+16", len([]rune(p)))
+		}
+		if !balancedTags(p) {
+			t.Errorf("кусок с несбалансированными тегами: %q", p)
+		}
+	}
+	if got := strings.Join(pieces, ""); stripTags(got) != stripTags(html) {
+		t.Errorf("текст кусков потерян:\n got=%q\nwant=%q", stripTags(got), stripTags(html))
+	}
+}
+
+// balancedTags проверяет, что открытые/закрытые теги b/i/code/pre/a
+// сбалансированы (игнорируя br/img).
+func balancedTags(s string) bool {
+	var stack []string
+	for i := 0; i < len(s); i++ {
+		if s[i] != '<' {
+			continue
+		}
+		j := i + 1
+		for j < len(s) && s[j] != '>' {
+			j++
+		}
+		if j >= len(s) {
+			return false
+		}
+		tag := s[i : j+1]
+		name := strings.TrimPrefix(tag, "</")
+		name = strings.TrimPrefix(name, "<")
+		if k := strings.IndexAny(name, " \t>"); k >= 0 {
+			name = name[:k]
+		}
+		if name == "" || strings.HasSuffix(tag, "/>") || name == "br" || name == "img" {
+			i = j
+			continue
+		}
+		if strings.HasPrefix(tag, "</") {
+			if len(stack) == 0 || stack[len(stack)-1] != name {
+				return false
+			}
+			stack = stack[:len(stack)-1]
+		} else {
+			stack = append(stack, name)
+		}
+		i = j
+	}
+	return len(stack) == 0
+}
+
+// stripTags убирает все HTML-теги, оставляя только текстовое содержимое.
+func stripTags(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == '<' {
+			for i < len(s) && s[i] != '>' {
+				i++
+			}
+			continue
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
+func TestTruncate(t *testing.T) {
+	// Короткая строка возвращается как есть.
+	if got := truncate("коротко"); got != "коротко" {
+		t.Errorf("truncate(short) = %q, want %q", got, "коротко")
+	}
+	// Много-байтовые руны не должны разрываться посередине: результат
+	// должен быть валидной UTF-8 строкой без ошибок декодирования.
+	long := "日本語のテキストが含まれる очень длинное сообщение " + strings.Repeat("x", 5000)
+	got := truncate(long)
+	wantLen := maxMessageLen
+	if len([]rune(got)) != wantLen {
+		t.Errorf("truncate() length = %d runes, want %d", len([]rune(got)), wantLen)
+	}
+	if !strings.HasSuffix(got, "...") {
+		t.Errorf("truncate() should end with '...', got %q", got)
+	}
+	if !utf8.ValidString(got) {
+		t.Errorf("truncate() produced invalid UTF-8: %q", got)
 	}
 }
 

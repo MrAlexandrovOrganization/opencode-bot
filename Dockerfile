@@ -21,6 +21,6 @@ RUN mkdir -p gen/whisper && \
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /bot ./cmd/bot
 
 FROM alpine:3.21
-RUN apk add --no-cache ca-certificates tzdata
+RUN apk add --no-cache ca-certificates tzdata ffmpeg
 COPY --from=builder /bot /bot
 CMD ["/bot"]

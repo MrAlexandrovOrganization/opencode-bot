@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math/rand"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -22,10 +24,11 @@ const maxMessageLen = 4000
 
 // Bot is the main application struct.
 type Bot struct {
-	api     *telego.Bot
-	backend *backend.Client
-	whisper *whisper.Client // nil if Whisper is not configured
-	cfg     *config.Config
+	api        *telego.Bot
+	backend    *backend.Client
+	whisper    *whisper.Client // nil if Whisper is not configured
+	cfg        *config.Config
+	httpClient *http.Client // для скачивания файлов из Telegram (с таймаутом)
 
 	mu        sync.Mutex
 	sessionID string
@@ -37,6 +40,14 @@ type Bot struct {
 	userMsgID string              // messageID user-эха текущего запроса (части игнорируются)
 	perms     map[string]*permAsk // permissionID -> pending "ask" prompt
 	pendingQ  *pendingQuestions   // question the agent is awaiting an answer to
+
+	// reqCtx/reqCancel — контекст текущего запроса. Отменяется при
+	// завершении (finishStream) или сбросе (release), чтобы прервать
+	// долгие операции внешних сервисов (например, опрос транскрибации
+	// Whisper), которые иначе продолжались бы до своего собственного
+	// дедлайна, удерживая busy-флаг.
+	reqCtx    context.Context
+	reqCancel context.CancelFunc
 }
 
 // Stream tracks the in-flight assistant message so the WebSocket bus can
@@ -73,12 +84,13 @@ type permAsk struct {
 // New creates a new Bot.
 func New(api *telego.Bot, backendClient *backend.Client, whisperClient *whisper.Client, cfg *config.Config) *Bot {
 	return &Bot{
-		api:     api,
-		backend: backendClient,
-		whisper: whisperClient,
-		cfg:     cfg,
-		agent:   cfg.DefaultAgent,
-		perms:   make(map[string]*permAsk),
+		api:        api,
+		backend:    backendClient,
+		whisper:    whisperClient,
+		cfg:        cfg,
+		httpClient: &http.Client{Timeout: 2 * time.Minute},
+		agent:      cfg.DefaultAgent,
+		perms:      make(map[string]*permAsk),
 	}
 }
 
@@ -151,9 +163,40 @@ func (b *Bot) tryAcquire() bool {
 	return true
 }
 
+// beginRequest захватывает busy-флаг и создаёт отменяемый контекст запроса,
+// который будет отменён в release() (при финализации стрима или ошибке).
+// Возвращает ok=false, если бот уже занят. Полученный ctx следует
+// передавать во внешние вызовы (backend, Whisper, скачивание файлов), чтобы
+// их можно было прервать при /abort, таймауте или завершении запроса.
+func (b *Bot) beginRequest() (context.Context, bool) {
+	if !b.tryAcquire() {
+		return nil, false
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	b.mu.Lock()
+	b.reqCtx, b.reqCancel = ctx, cancel
+	b.mu.Unlock()
+	return ctx, true
+}
+
+// requestContext возвращает контекст текущего запроса (или Background).
+func (b *Bot) requestContext() context.Context {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.reqCtx != nil {
+		return b.reqCtx
+	}
+	return context.Background()
+}
+
 func (b *Bot) release() {
 	b.mu.Lock()
 	b.busy = false
+	if b.reqCancel != nil {
+		b.reqCancel()
+		b.reqCancel = nil
+		b.reqCtx = nil
+	}
 	b.mu.Unlock()
 }
 
@@ -193,8 +236,10 @@ func (b *Bot) Run(ctx context.Context) {
 	}
 }
 
-// eventLoop keeps a single WebSocket subscription alive, reconnecting with backoff.
+// eventLoop keeps a single WebSocket subscription alive, reconnecting with
+// exponential backoff + jitter (cap 15s) so повторные обрывы не спамят шлюз.
 func (b *Bot) eventLoop(ctx context.Context) {
+	backoff := time.Second
 	for {
 		err := b.backend.Events(ctx, b.handleEvent)
 		if ctx.Err() != nil {
@@ -204,8 +249,11 @@ func (b *Bot) eventLoop(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(3 * time.Second):
+		case <-time.After(backoff):
 		}
+		// backoff *= 2 с джиттером, но не более 15s.
+		jitter := time.Duration(rand.Int63n(int64(backoff) / 2))
+		backoff = min(backoff*2+jitter, 15*time.Second)
 	}
 }
 
@@ -730,7 +778,7 @@ func splitMarkdownChunks(text string) []string {
 		}
 	}
 	add := func(html string) {
-		for _, piece := range splitRunes(html, maxMessageLen) {
+		for _, piece := range splitHTMLChunks(html, maxMessageLen) {
 			n := len([]rune(piece))
 			if bufLen > 0 && bufLen+n > maxMessageLen {
 				flush()
@@ -874,6 +922,108 @@ func splitRunes(s string, n int) []string {
 	return pieces
 }
 
+// splitHTMLChunks splits an already-rendered Telegram HTML fragment into
+// pieces of at most n runes each. В отличие от наивного splitRunes, он не
+// разрезает тег посередине и сохраняет баланс вложенности тегов между
+// кусками: открытые теги закрываются в конце куска и переоткрываются в
+// начале следующего. Используется, когда один блок markdown рендерится в
+// HTML длиннее лимита сообщения (иначе Telegram отверг бы кусок с
+// незакрытым/разорванным тегом).
+func splitHTMLChunks(s string, n int) []string {
+	if n <= 0 {
+		n = 1
+	}
+	runes := []rune(s)
+	if len(runes) <= n {
+		return []string{s}
+	}
+
+	var out []string
+	var buf strings.Builder
+	var open []string // стек имён открытых тегов
+
+	closeOpen := func() {
+		for i := len(open) - 1; i >= 0; i-- {
+			buf.WriteString("</" + open[i] + ">")
+		}
+	}
+	reopenOpen := func() {
+		for _, t := range open {
+			buf.WriteString("<" + t + ">")
+		}
+	}
+	flush := func() {
+		if buf.Len() == 0 {
+			return
+		}
+		closeOpen()
+		out = append(out, buf.String())
+		buf.Reset()
+		reopenOpen()
+	}
+	tagName := func(tag string) string {
+		name := strings.TrimPrefix(tag, "</")
+		name = strings.TrimPrefix(name, "<")
+		if i := strings.IndexAny(name, " \t>"); i >= 0 {
+			name = name[:i]
+		}
+		return name
+	}
+
+	i := 0
+	for i < len(runes) {
+		if runes[i] == '<' {
+			j := i + 1
+			for j < len(runes) && runes[j] != '>' {
+				j++
+			}
+			if j >= len(runes) {
+				// Незакрытый '<' — трактуем как обычный текст.
+				buf.WriteRune(runes[i])
+				i++
+				continue
+			}
+			tag := string(runes[i : j+1])
+			buf.WriteString(tag)
+			name := tagName(tag)
+			if name != "" && !strings.HasSuffix(tag, "/>") {
+				if strings.HasPrefix(tag, "</") {
+					for k := len(open) - 1; k >= 0; k-- {
+						if open[k] == name {
+							open = open[:k]
+							break
+						}
+					}
+				} else if name != "br" && name != "img" {
+					open = append(open, name)
+				}
+			}
+			i = j + 1
+			continue
+		}
+
+		// Текстовый кусок до следующего '<' или лимита.
+		start := i
+		for i < len(runes) && runes[i] != '<' {
+			if len([]rune(buf.String())) >= n && i > start {
+				flush()
+				break
+			}
+			buf.WriteRune(runes[i])
+			i++
+		}
+		if len([]rune(buf.String())) >= n {
+			flush()
+		}
+	}
+	flush()
+	if len(out) == 0 {
+		// Весь текст оказался внутри одного гигантского неразбиваемого тега.
+		return []string{truncate(s)}
+	}
+	return out
+}
+
 func isMarkdownHeader(s string) bool {
 	return reHeader.MatchString(s)
 }
@@ -907,8 +1057,9 @@ func unmarshalProps(ev backend.Event, out any) error {
 }
 
 func truncate(s string) string {
-	if len(s) <= maxMessageLen {
+	r := []rune(s)
+	if len(r) <= maxMessageLen {
 		return s
 	}
-	return s[:maxMessageLen-3] + "..."
+	return string(r[:maxMessageLen-3]) + "..."
 }
