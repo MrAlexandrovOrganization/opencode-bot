@@ -2,13 +2,20 @@
 # There is no official public image, so we download the release build.
 FROM ubuntu:24.04 AS download
 
-ARG OPENCODE_TARGET=linux-x64
+ARG TARGETARCH
+ARG OPENCODE_TARGET
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
-RUN url="https://github.com/anomalyco/opencode/releases/latest/download/opencode-${OPENCODE_TARGET}.tar.gz" \
+RUN case "${TARGETARCH}" in \
+        amd64) default_target=linux-x64 ;; \
+        arm64) default_target=linux-arm64 ;; \
+        *) echo "Unsupported target architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+    && target="${OPENCODE_TARGET:-$default_target}" \
+    && url="https://github.com/anomalyco/opencode/releases/latest/download/opencode-${target}.tar.gz" \
     && curl -fsSL -o /tmp/opencode.tar.gz "$url" \
     && tar -xzf /tmp/opencode.tar.gz -C /usr/local/bin opencode \
     && chmod +x /usr/local/bin/opencode \
@@ -16,6 +23,7 @@ RUN url="https://github.com/anomalyco/opencode/releases/latest/download/opencode
 
 FROM ubuntu:24.04
 
+ARG TARGETARCH
 ARG GO_VERSION=1.26.6
 
 # Dev toolchain: make/gcc (build-essential), Python 3 + pip + poetry, jq for
@@ -36,7 +44,7 @@ RUN apt-get update \
 # Go toolchain. apt's golang-go on 24.04 is Go 1.22 — too old for the projects
 # here (notes-bot, ollama-bot, location need go >= 1.26), so install the
 # official build.
-RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" -o /tmp/go.tgz \
+RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${TARGETARCH}.tar.gz" -o /tmp/go.tgz \
     && tar -C /usr/local -xzf /tmp/go.tgz \
     && rm /tmp/go.tgz
 

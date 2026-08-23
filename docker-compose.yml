@@ -20,22 +20,20 @@ services:
       #     пароля) внутри контейнера; см. закомментированный volume ниже.
       #   GH_TOKEN — GitHub PAT (fine-grained, contents:write на репозитории);
       #     переписывает git-URL на HTTPS, SSH не требуется.
-      GIT_DEPLOY_KEY_PATH: ${GIT_DEPLOY_KEY_PATH:-}
-      GH_TOKEN: ${GH_TOKEN:-}
     volumes:
       # Read-only access to the whole home directory ("читай почти всё").
-      - /home/maxim:/home/maxim:ro
+      - ${HOME}:/home/maxim:ro
       # Writable project root — the only place the agent may edit files.
       # Overrides the read-only /home/maxim mount for this subtree.
-      - /home/maxim/projects:/workspace
+      - ${HOME}/projects:/workspace
       # Reuse the host opencode state (config, plugins, DB, provider auth).
-      - /home/maxim/.config/opencode:/mnt/config
-      - /home/maxim/.local/share/opencode:/mnt/data
-      - /home/maxim/.cache/opencode:/mnt/cache
+      - ${HOME}/.config/opencode:/mnt/config
+      - ${HOME}/.local/share/opencode:/mnt/data
+      - ${HOME}/.cache/opencode:/mnt/cache
       # Deploy-ключ для git push в GitHub. Ключ на хосте — ~/.ssh/github
       # (без парольной фразы, даёт write-доступ к нужным репозиториям).
       # Путь внутри контейнера задаётся в GIT_DEPLOY_KEY_PATH (см. .env).
-      - /home/maxim/.ssh/github:/run/secrets/git_deploy_id_ed25519:ro
+      # - ${HOME}/.ssh/github:/run/secrets/git_deploy_id_ed25519:ro
     networks:
       - whisper-net
     extends:
@@ -80,7 +78,7 @@ services:
       # /workspace (внешний маунт) — переживает рестарт и шлюза, и бота.
       DB_PATH: /workspace/.opencode-backend/opencode-backend.db
     volumes:
-      - /home/maxim/projects:/workspace
+      - ${HOME}/projects:/workspace
     networks:
       - whisper-net
     healthcheck:
