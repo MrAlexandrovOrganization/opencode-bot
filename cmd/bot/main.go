@@ -13,6 +13,7 @@ import (
 	"opencode-bot/internal/backend"
 	"opencode-bot/internal/bot"
 	"opencode-bot/internal/config"
+	"opencode-bot/internal/logx"
 	"opencode-bot/internal/whisper"
 
 	"github.com/mymmrac/telego"
@@ -58,6 +59,8 @@ func main() {
 			slog.Error("whisper client", "error", err)
 			os.Exit(1)
 		}
+
+		logx.Setup("opencode-bot", cfg.BotToken, cfg.BackendToken)
 		defer whisperClient.Close()
 		slog.Info("whisper configured", "host", cfg.WhisperGRPCHost, "port", cfg.WhisperGRPCPort)
 	}
