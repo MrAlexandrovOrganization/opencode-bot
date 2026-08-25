@@ -51,55 +51,18 @@ services:
       retries: 10
       start_period: 30s
 
-  opencode-backend:
-    build:
-      context: ../../backends/opencode-backend
-      dockerfile: Dockerfile
-    restart: unless-stopped
-    depends_on:
-      opencode-server:
-        condition: service_healthy
-    environment:
-      # Единственный клиент opencode-сервера — шлюз.
-      OPENCODE_BASE_URL: http://opencode-server:4096
-      OPENCODE_USERNAME: ${OPENCODE_USERNAME:-opencode}
-      OPENCODE_PASSWORD: ${OPENCODE_PASSWORD:-}
-      OPENCODE_MODEL: ${OPENCODE_MODEL:-}
-      OPENCODE_AGENT: ${OPENCODE_AGENT:-build}
-      PERMISSION_MODE: ${PERMISSION_MODE:-ask}
-      OPENCODE_REQUEST_TIMEOUT: ${OPENCODE_REQUEST_TIMEOUT:-30m}
-      # Рабочая директория шлюза видна opencode-серверу как /workspace —
-      # загруженные файлы агент может читать.
-      WORKSPACE_DIR: /workspace
-      # Токен, которым бот (и другие фронтенды) ходит в шлюз.
-      ADMIN_TOKEN: ${BACKEND_TOKEN:-}
-      LOG_LEVEL: ${LOG_LEVEL:-info}
-      # SQLite-файл истории сессий/сообщений (пусто = in-memory). Лежит в
-      # /workspace (внешний маунт) — переживает рестарт и шлюза, и бота.
-      DB_PATH: /workspace/.opencode-backend/opencode-backend.db
-    volumes:
-      - ${HOME}/projects:/workspace
-    networks:
-      - whisper-net
-    healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 15s
-    extends:
-      file: docker-compose.base.yml
-      service: base
+  # opencode-backend (шлюз) НЕ поднимается в этом стеке: он разрабатывается и
+  # деплоится отдельно (свой репозиторий + CI, см. backends/opencode-backend).
+  # Уже запущенный шлюз должен быть доступен на сети whisper-net под именем
+  # opencode-backend (порт 8080) — бот ходит в него через BACKEND_BASE_URL.
 
   opencode-bot:
     build: .
     restart: unless-stopped
     env_file: .env
-    depends_on:
-      opencode-backend:
-        condition: service_healthy
     environment:
-      # Бот ходит только в шлюз (REST + WebSocket).
+      # Бот ходит только в шлюз (REST + WebSocket), поднятый отдельно.
+      # Шлюз — сервис opencode-backend на сети whisper-net.
       BACKEND_BASE_URL: http://opencode-backend:8080
       BACKEND_TOKEN: ${BACKEND_TOKEN:-}
       OPENCODE_MODEL: ${OPENCODE_MODEL:-}

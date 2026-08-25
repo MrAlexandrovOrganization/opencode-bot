@@ -29,19 +29,24 @@ permissions, вопросы, загрузка файлов) идёт через 
     состояние, конфиги, провайдеры, БД.
   - Служит под `ubuntu` (UID 1000), git-identity задаётся из env через
     `scripts/entrypoint.sh`.
-- **`opencode-backend`** (`../backends/opencode-backend/Dockerfile`) — шлюз:
-  REST + WebSocket, асинхронные сессии, история, permissions, вопросы, upload.
-  Пишет загруженные файлы в `/workspace/.opencode-backend/uploads` (маунт
-  `/home/maxim/projects:/workspace`), поэтому агент их видит. Слушает порт `8080`.
 - **`opencode-bot`** (`Dockerfile`) — сам бот. Собирает Go-бинарник, proto-стабы
-  генерируются внутри образа. Запускается с `env_file: .env`, ходит только
-  в `opencode-backend` (`BACKEND_BASE_URL`, `BACKEND_TOKEN`).
+  генерируются внутри образа. Запускается с `env_file: .env`, ходит в
+  **внешний** шлюз `opencode-backend` (`BACKEND_BASE_URL`, `BACKEND_TOKEN`).
 
 Внешние сети: `telegram-net` (общий локальный Telegram Bot API-сервер) и
 `whisper-net` (общий gRPC-сервис транскрибации; на ней же сидят `opencode-server`
-и `opencode-backend`).
+и развернутый отдельно шлюз `opencode-backend`).
 
-Запуск: `make up` (сборка + старт), `make server` (только opencode-server).
+**`opencode-backend` (шлюз) здесь НЕ поднимается.** Он разрабатывается и
+деплоится отдельно — свой репозиторий `backends/opencode-backend` со своим CI.
+В `docker-compose.yml` этого бота сервиса `opencode-backend` нет; бот
+подключается к уже запущенному шлюзу (сервис `opencode-backend` на сети
+`whisper-net`, порт `8080`). Шлюз, в свою очередь, ходит в `opencode-server`
+(тоже на `whisper-net`, порт `4096`), поэтому `opencode-server` остаётся
+в этом стеке и общий для шлюза и бота.
+
+Запуск: `make up` (сборка + старт opencode-server и opencode-bot),
+`make server` (только opencode-server). Шлюз поднимается отдельно в его репозитории.
 
 ## Структура репозитория
 
@@ -112,7 +117,7 @@ agents/                      — документы для дальнейшей 
 |---|---|
 | `BOT_TOKEN` | токен Telegram-бота (обязателен) |
 | `ROOT_ID` | telegram user ID единственного авторизованного пользователя (обязателен) |
-| `BACKEND_BASE_URL` | URL шлюза opencode-backend (`http://opencode-backend:8080` в docker) |
+| `BACKEND_BASE_URL` | URL внешнего шлюза opencode-backend (`http://opencode-backend:8080` в docker на сети whisper-net; для локального запуска — опубликованный порт, напр. `http://localhost:8091`) |
 | `BACKEND_TOKEN` | токен шлюза = `ADMIN_TOKEN` сервиса opencode-backend (обязателен) |
 | `OPENCODE_MODEL` | модель по умолчанию (пусто = серверная) |
 | `OPENCODE_AGENT` | агент по умолчанию (default `build`) |
