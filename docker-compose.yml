@@ -17,9 +17,10 @@ services:
       GIT_USER_EMAIL: ${GIT_USER_EMAIL:-}
       # Optional GitHub push access for the agent (see scripts/entrypoint.sh):
       #   GIT_DEPLOY_KEY_PATH — путь к смонтированному SSH deploy-ключу (без
-      #     пароля) внутри контейнера; см. закомментированный volume ниже.
+      #     пароля) внутри контейнера; см. раскомментированный volume ниже.
       #   GH_TOKEN — GitHub PAT (fine-grained, contents:write на репозитории);
       #     переписывает git-URL на HTTPS, SSH не требуется.
+      GIT_DEPLOY_KEY_PATH: ${GIT_DEPLOY_KEY_PATH:-}
     volumes:
       # Read-only access to the whole home directory ("читай почти всё").
       - ${HOME}:/home/maxim:ro
@@ -33,7 +34,7 @@ services:
       # Deploy-ключ для git push в GitHub. Ключ на хосте — ~/.ssh/github
       # (без парольной фразы, даёт write-доступ к нужным репозиториям).
       # Путь внутри контейнера задаётся в GIT_DEPLOY_KEY_PATH (см. .env).
-      # - ${HOME}/.ssh/github:/run/secrets/git_deploy_id_ed25519:ro
+      - ${HOME}/.ssh/github:/run/secrets/git_deploy_id_ed25519:ro
     networks:
       - whisper-net
     extends:
