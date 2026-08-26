@@ -75,18 +75,18 @@ func (b *Bot) handleVoice(msg *telego.Message) {
 		return
 	}
 
-	var fileID, format string
+	var fileID, format, noun string
 	switch {
 	case msg.Voice != nil:
-		fileID, format = msg.Voice.FileID, "ogg"
+		fileID, format, noun = msg.Voice.FileID, "ogg", "голосовое"
 	case msg.VideoNote != nil:
-		fileID, format = msg.VideoNote.FileID, "mp4"
+		fileID, format, noun = msg.VideoNote.FileID, "mp4", "кружочек"
 	default:
 		b.release()
 		return
 	}
 
-	statusMsg, err := b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), "⏳ Скачиваю аудио..."))
+	statusMsg, err := b.api.SendMessage(ctx, tu.Message(tu.ID(msg.Chat.ID), "⏳ Скачиваю "+noun+"..."))
 	if err != nil {
 		b.release()
 		slog.Error("send status", "error", err)
@@ -96,7 +96,7 @@ func (b *Bot) handleVoice(msg *telego.Message) {
 	data, err := b.downloadFile(ctx, fileID)
 	if err != nil {
 		b.release()
-		b.editMessage(ctx, msg.Chat.ID, statusMsg.MessageID, "❌ Не удалось скачать аудио: "+err.Error())
+		b.editMessage(ctx, msg.Chat.ID, statusMsg.MessageID, "❌ Не удалось скачать "+noun+": "+err.Error())
 		return
 	}
 	slog.Info("voice received", "file_id", fileID, "bytes", len(data))
