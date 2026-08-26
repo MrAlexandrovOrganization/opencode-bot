@@ -98,8 +98,8 @@ func (b *Bot) cmdReset(msg *telego.Message) {
 		// не плодим новую пустую — оставляем текущую.
 		empty, err := b.backend.IsSessionEmpty(ctx, old)
 		if err == nil && empty {
-			b.send(msg.Chat.ID,
-				fmt.Sprintf("Сессия <code>%s</code> пустая — новая не создана.", escapeHTML(old)))
+			b.sendHTML(msg.Chat.ID,
+				fmt.Sprintf("Сессия <code>%s</code> пустая — новая не создана.", escapeHTML(old)), nil)
 			return
 		}
 	}
@@ -115,7 +115,7 @@ func (b *Bot) cmdReset(msg *telego.Message) {
 	if old != "" && old != id {
 		_ = b.backend.DeleteSession(ctx, old)
 	}
-	b.send(msg.Chat.ID, fmt.Sprintf("Новая сессия создана: <code>%s</code>", escapeHTML(id)))
+	b.sendHTML(msg.Chat.ID, fmt.Sprintf("Новая сессия создана: <code>%s</code>", escapeHTML(id)), nil)
 }
 
 func (b *Bot) cmdSession(msg *telego.Message) {
@@ -178,7 +178,7 @@ func (b *Bot) cmdModel(msg *telego.Message) {
 		model := b.model
 		b.mu.Unlock()
 		if model == nil {
-			b.send(msg.Chat.ID, "Модель: <i>(по умолчанию из конфига сервера)</i>")
+			b.sendHTML(msg.Chat.ID, "Модель: <i>(по умолчанию из конфига сервера)</i>", nil)
 			return
 		}
 		b.send(msg.Chat.ID, "Модель: "+model.ProviderID+"/"+model.ModelID)
@@ -194,7 +194,7 @@ func (b *Bot) cmdModel(msg *telego.Message) {
 	b.mu.Lock()
 	b.model = &backend.ModelRef{ProviderID: parts[0], ModelID: parts[1]}
 	b.mu.Unlock()
-	b.send(msg.Chat.ID, "✅ Модель: <code>"+escapeHTML(args)+"</code>")
+	b.sendHTML(msg.Chat.ID, "✅ Модель: <code>"+escapeHTML(args)+"</code>", nil)
 }
 
 func (b *Bot) cmdAgent(msg *telego.Message) {
@@ -212,7 +212,7 @@ func (b *Bot) cmdAgent(msg *telego.Message) {
 	b.mu.Lock()
 	b.agent = args
 	b.mu.Unlock()
-	b.send(msg.Chat.ID, "✅ Агент: <code>"+escapeHTML(args)+"</code>")
+	b.sendHTML(msg.Chat.ID, "✅ Агент: <code>"+escapeHTML(args)+"</code>", nil)
 }
 
 // ── Formatting ───────────────────────────────────────────────────────────────
