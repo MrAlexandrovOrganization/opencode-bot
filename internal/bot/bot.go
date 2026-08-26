@@ -41,6 +41,11 @@ type Bot struct {
 	perms     map[string]*permAsk // permissionID -> pending "ask" prompt
 	pendingQ  *pendingQuestions   // question the agent is awaiting an answer to
 
+	// activeJob — активная транскрибация Whisper, чтобы пользователь мог
+	// отменить её кнопкой «Отменить» (как в transcriber-bot). Единственная,
+	// т.к. бот однопользовательский и серийный (busy-флаг).
+	activeJob *transcriptionJob
+
 	// reqCtx/reqCancel — контекст текущего запроса. Отменяется при
 	// завершении (finishStream) или сбросе (release), чтобы прервать
 	// долгие операции внешних сервисов (например, опрос транскрибации
@@ -662,6 +667,32 @@ func (b *Bot) editMessage(ctx context.Context, chatID int64, msgID int, text str
 	if _, err := b.api.EditMessageText(ctx, params); err != nil {
 		slog.Debug("editMessage", "error", err)
 	}
+}
+
+// editMessageWithKeyboard редактирует статус-сообщение, опционально добавляя
+// inline-клавиатуру (например, кнопку «Отменить» при расшифровке).
+func (b *Bot) editMessageWithKeyboard(ctx context.Context, chatID int64, msgID int, text string, kb *telego.InlineKeyboardMarkup) {
+	params := tu.EditMessageText(tu.ID(chatID), msgID, truncate(text))
+	if kb != nil {
+		params = params.WithReplyMarkup(kb)
+	}
+	if _, err := b.api.EditMessageText(ctx, params); err != nil {
+		slog.Debug("editMessageWithKeyboard", "error", err)
+	}
+}
+
+// setActiveJob/clearActiveJob регистрируют активную транскрибацию, чтобы
+// inline-кнопка «Отменить» могла её прервать.
+func (b *Bot) setActiveJob(j *transcriptionJob) {
+	b.mu.Lock()
+	b.activeJob = j
+	b.mu.Unlock()
+}
+
+func (b *Bot) clearActiveJob() {
+	b.mu.Lock()
+	b.activeJob = nil
+	b.mu.Unlock()
 }
 
 func (b *Bot) editMessageHTML(ctx context.Context, chatID int64, msgID int, html string) {

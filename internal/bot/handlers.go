@@ -3,6 +3,7 @@ package bot
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -12,12 +13,56 @@ import (
 	"strings"
 	"time"
 
+	pb "opencode-bot/gen/whisper"
+
 	"opencode-bot/internal/backend"
 	"opencode-bot/internal/whisper"
 
 	"github.com/mymmrac/telego"
 	tu "github.com/mymmrac/telego/telegoutil"
 )
+
+// errTranscriptionCancelled возвращается transcribeVoice, когда расшифровка
+// отменена пользователем через inline-кнопку «Отменить» (или при отмене
+// контекста запроса по любой другой причине).
+var errTranscriptionCancelled = errors.New("расшифровка отменена")
+
+// transcriptionJob описывает активную транскрибацию Whisper, чтобы пользователь
+// мог отменить её кнопкой, как в transcriber-bot. Одновременно активна не
+// более одной (бот однопользовательский и серийный).
+type transcriptionJob struct {
+	jobID  string
+	chatID int64
+	msgID  int
+}
+
+// cancelKeyboard возвращает inline-клавиатуру с единственной кнопкой
+// «Отменить» для активной расшифровки, как в transcriber-bot.
+func cancelKeyboard() *telego.InlineKeyboardMarkup {
+	return &telego.InlineKeyboardMarkup{InlineKeyboard: [][]telego.InlineKeyboardButton{
+		{{Text: "❌ Отменить", CallbackData: "cancel:transcribe"}},
+	}}
+}
+
+// transcriptionStatusText формирует текст статуса расшифровки по стадии
+// задания (как в transcriber-bot): очередь / загрузка / запуск / прогресс.
+func transcriptionStatusText(result *whisper.JobResult) string {
+	switch result.Status() {
+	case pb.JobStatus_QUEUED:
+		return "⏳ В очереди, подожди немного..."
+	case pb.JobStatus_DOWNLOADING:
+		return "⏳ Файл загружен, ставлю в очередь..."
+	case pb.JobStatus_ACCEPTED:
+		return "⏳ Принято, готовлюсь к расшифровке..."
+	case pb.JobStatus_RUNNING:
+		if result.ProgressPercent > 0 {
+			return fmt.Sprintf("⏳ Расшифровываю... %.0f%%", result.ProgressPercent)
+		}
+		return "⏳ Расшифровываю..."
+	default:
+		return "⏳ Расшифровываю..."
+	}
+}
 
 // newMessageRequest builds a request with the configured agent and model.
 func (b *Bot) newMessageRequest() backend.MessageRequest {
@@ -129,7 +174,11 @@ func (b *Bot) handleVoice(msg *telego.Message) {
 	if err != nil {
 		b.release()
 		slog.Error("transcribe", "error", err)
-		b.editMessage(ctx, msg.Chat.ID, statusMsg.MessageID, "❌ Ошибка расшифровки: "+err.Error())
+		if errors.Is(err, errTranscriptionCancelled) {
+			b.editMessage(ctx, msg.Chat.ID, statusMsg.MessageID, "❌ Расшифровка отменена.")
+		} else {
+			b.editMessage(ctx, msg.Chat.ID, statusMsg.MessageID, "❌ Ошибка расшифровки: "+err.Error())
+		}
 		return
 	}
 
@@ -143,7 +192,8 @@ func (b *Bot) handleVoice(msg *telego.Message) {
 }
 
 // transcribeVoice submits audio to the Whisper gRPC service and polls for
-// the result, updating the status message with progress.
+// the result, обновляя статус-сообщение по стадиям и показывая кнопку
+// «Отменить» (как в transcriber-bot).
 func (b *Bot) transcribeVoice(ctx context.Context, data []byte, format string, chatID int64, statusMsgID int) (string, error) {
 	jobID, pos, err := b.whisper.Submit(bytes.NewReader(data), format, nil)
 	if err != nil {
@@ -154,11 +204,17 @@ func (b *Bot) transcribeVoice(ctx context.Context, data []byte, format string, c
 	}
 	slog.Info("whisper job submitted", "job_id", jobID, "queue_position", pos)
 
+	b.setActiveJob(&transcriptionJob{jobID: jobID, chatID: chatID, msgID: statusMsgID})
+	defer b.clearActiveJob()
+
+	// Начальный статус с кнопкой отмены; позицию в очереди показываем, если
+	// задание не первое.
+	initial := "⏳ Расшифровываю..."
 	if pos > 1 {
-		b.editMessage(ctx, chatID, statusMsgID, fmt.Sprintf("⏳ В очереди (позиция %d), подожди немного...", pos))
-	} else {
-		b.editMessage(ctx, chatID, statusMsgID, "⏳ Расшифровываю...")
+		initial = fmt.Sprintf("⏳ В очереди (позиция %d), подожди немного...", pos)
 	}
+	b.editMessageWithKeyboard(ctx, chatID, statusMsgID, initial, cancelKeyboard())
+	lastStatus := initial
 
 	const pollInterval = 5 * time.Second
 	const pollDeadline = 3 * time.Hour
@@ -166,13 +222,12 @@ func (b *Bot) transcribeVoice(ctx context.Context, data []byte, format string, c
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 	deadline := time.After(pollDeadline)
-	lastStatus := ""
 
 	for {
 		select {
 		case <-ctx.Done():
 			_, _ = b.whisper.Cancel(jobID)
-			return "", ctx.Err()
+			return "", errTranscriptionCancelled
 		case <-deadline:
 			_, _ = b.whisper.Cancel(jobID)
 			return "", fmt.Errorf("превышено время ожидания расшифровки")
@@ -185,7 +240,7 @@ func (b *Bot) transcribeVoice(ctx context.Context, data []byte, format string, c
 		}
 		if result.IsFailed() {
 			if result.Error == "cancelled" {
-				return "", fmt.Errorf("расшифровка отменена")
+				return "", errTranscriptionCancelled
 			}
 			return "", fmt.Errorf("whisper: %s", result.Error)
 		}
@@ -196,12 +251,9 @@ func (b *Bot) transcribeVoice(ctx context.Context, data []byte, format string, c
 			return strings.TrimSpace(result.Text), nil
 		}
 
-		statusText := "⏳ Расшифровываю..."
-		if result.ProgressPercent > 0 {
-			statusText = fmt.Sprintf("⏳ Расшифровываю... %.0f%%", result.ProgressPercent)
-		}
+		statusText := transcriptionStatusText(result)
 		if statusText != lastStatus {
-			b.editMessage(ctx, chatID, statusMsgID, statusText)
+			b.editMessageWithKeyboard(ctx, chatID, statusMsgID, statusText, cancelKeyboard())
 			lastStatus = statusText
 		}
 	}

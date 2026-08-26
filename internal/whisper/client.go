@@ -49,6 +49,11 @@ type JobResult struct {
 func (r *JobResult) IsDone() bool   { return r.status == pb.JobStatus_DONE }
 func (r *JobResult) IsFailed() bool { return r.status == pb.JobStatus_FAILED }
 
+// Status returns the raw job status enum, for callers that want to render
+// per-stage progress (ACCEPTED/DOWNLOADING/QUEUED/RUNNING) instead of just
+// done/failed.
+func (r *JobResult) Status() pb.JobStatus { return r.status }
+
 type Client struct {
 	conn *grpc.ClientConn
 	stub pb.TranscriptionServiceClient

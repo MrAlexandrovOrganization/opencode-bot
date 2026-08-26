@@ -77,6 +77,10 @@ func (b *Bot) askPermission(p backend.PermissionAsked) {
 
 // handleCallback processes inline keyboard callbacks (permission replies).
 func (b *Bot) handleCallback(query *telego.CallbackQuery) {
+	if strings.HasPrefix(query.Data, "cancel:") {
+		b.handleCancelCallback(query)
+		return
+	}
 	if strings.HasPrefix(query.Data, "qans:") {
 		b.handleQuestionAnswer(query)
 		return
@@ -136,4 +140,40 @@ func (b *Bot) handleCallback(query *telego.CallbackQuery) {
 			tu.EditMessageText(tu.ID(msg.Chat.ID), msg.MessageID, label),
 		)
 	}
+}
+
+// handleCancelCallback отменяет активную транскрибацию Whisper по нажатию
+// inline-кнопки «Отменить», как в transcriber-bot. Отменяет контекст запроса
+// (цикл опроса в transcribeVoice поймает ctx.Done() и сообщит об отмене) и
+// явно просит бэкенд снять задание.
+func (b *Bot) handleCancelCallback(query *telego.CallbackQuery) {
+	b.mu.Lock()
+	job := b.activeJob
+	b.mu.Unlock()
+	if job == nil {
+		_ = b.api.AnswerCallbackQuery(context.Background(), &telego.AnswerCallbackQueryParams{
+			CallbackQueryID: query.ID,
+			Text:            "Расшифровка уже завершена",
+		})
+		return
+	}
+
+	b.mu.Lock()
+	if b.reqCancel != nil {
+		b.reqCancel()
+	}
+	b.mu.Unlock()
+
+	if b.whisper != nil {
+		if _, cerr := b.whisper.Cancel(job.jobID); cerr != nil {
+			slog.Warn("cancel job on backend", "job_id", job.jobID, "error", cerr)
+		} else {
+			slog.Info("cancel sent to backend", "job_id", job.jobID)
+		}
+	}
+
+	_ = b.api.AnswerCallbackQuery(context.Background(), &telego.AnswerCallbackQueryParams{
+		CallbackQueryID: query.ID,
+		Text:            "❌ Отменяю расшифровку…",
+	})
 }
