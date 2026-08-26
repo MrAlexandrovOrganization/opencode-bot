@@ -22,6 +22,11 @@ import (
 // maxMessageLen is the safe Telegram message length (actual limit is 4096).
 const maxMessageLen = 4000
 
+// stallTimeout — если от шлюза нет событий дольше этого времени и финальное
+// message.updated так и не пришло, превью принудительно завершается, чтобы
+// сообщение с курсором не висело в чате вечно (иллюзия зависания).
+const stallTimeout = 120 * time.Second
+
 // Bot is the main application struct.
 type Bot struct {
 	api        *telego.Bot
@@ -71,6 +76,26 @@ type Stream struct {
 	done         chan struct{} // closed when the response is finalizing
 	stopped      chan struct{} // closed by the preview loop when it exits
 	finalizeOnce sync.Once
+	lastActivity time.Time // последнее событие от шлюза (part), для страховки зависания
+}
+
+// touch фиксирует активность шлюза, сбрасывая таймер зависания.
+func (st *Stream) touch() {
+	st.mu.Lock()
+	st.lastActivity = time.Now()
+	st.mu.Unlock()
+}
+
+// stalled возвращает true, если давно (stallTimeout) не было событий от шлюза
+// и финал так и не пришёл — значит, событие message.updated, скорее всего,
+// потерялось, и превью с курсором зависло бы навсегда.
+func (st *Stream) stalled() bool {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.lastActivity.IsZero() {
+		return false
+	}
+	return time.Since(st.lastActivity) > stallTimeout
 }
 
 // toolPartState mirrors the "tool" part state of the opencode server.
@@ -208,7 +233,7 @@ func (b *Bot) release() {
 func (b *Bot) beginStream(chatID int64, messageID int) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.stream = &Stream{chatID: chatID, messageID: messageID}
+	b.stream = &Stream{chatID: chatID, messageID: messageID, lastActivity: time.Now()}
 }
 
 func (b *Bot) endStream() {
@@ -303,6 +328,7 @@ func (b *Bot) onMessagePartUpdated(ev backend.Event) {
 	if st == nil {
 		return
 	}
+	st.touch()
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	switch props.Part.Type {
@@ -535,10 +561,26 @@ func (b *Bot) previewLoop(st *Stream, chatID int64) {
 		case <-st.done:
 			return
 		case <-ticker.C:
+			// Heartbeat: держим индикатор «печатает…» даже в тихие паузы
+			// (когда шлюз не шлёт событий), чтобы сообщение не выглядело
+			// зависшим.
+			_ = b.api.SendChatAction(context.Background(), &telego.SendChatActionParams{
+				ChatID: telego.ChatID{ID: chatID},
+				Action: "typing",
+			})
 			curr := b.previewText()
 			if curr != last && curr != "" {
-				b.editMessage(context.Background(), chatID, st.messageID, truncate(curr)+"▌")
+				// Явная метка «черновик», без двусмысленного курсора ▌.
+				b.editMessage(context.Background(), chatID, st.messageID,
+					"💭 <i>выполняется…</i>\n\n"+truncate(curr))
 				last = curr
+			}
+			// Страховка: шлюз давно не отвечал и финал не пришёл — зависаем
+			// превью, иначе сообщение с курсором осталось бы в чате навсегда.
+			if st.stalled() {
+				go b.finishStream(st, backend.Message{},
+					"⚠️ Ответ не финализирован шлюзом (нет события message.updated) — превью остановлено.")
+				return
 			}
 		}
 	}
