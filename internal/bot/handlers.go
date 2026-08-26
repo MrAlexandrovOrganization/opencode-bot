@@ -93,7 +93,15 @@ func (b *Bot) handleVoice(msg *telego.Message) {
 		return
 	}
 
-	data, err := b.downloadFile(ctx, fileID)
+	lastStatus := ""
+	data, err := b.downloadFile(ctx, fileID, func(downloaded, total int64) {
+		statusText := formatDownloadStatus(downloaded, total, noun)
+		if statusText == lastStatus {
+			return
+		}
+		b.editMessage(ctx, msg.Chat.ID, statusMsg.MessageID, statusText)
+		lastStatus = statusText
+	})
 	if err != nil {
 		b.release()
 		b.editMessage(ctx, msg.Chat.ID, statusMsg.MessageID, "❌ Не удалось скачать "+noun+": "+err.Error())
@@ -300,7 +308,7 @@ func (b *Bot) handleAudio(msg *telego.Message) {
 // вопроса, если не пуста. busy-флаг освобождается только при успешном
 // старте запроса (finishStream) либо при ошибке скачивания/загрузки.
 func (b *Bot) sendAttachment(ctx context.Context, chatID int64, fileID, filename, mime, caption string) {
-	data, err := b.downloadFile(ctx, fileID)
+	data, err := b.downloadFile(ctx, fileID, nil)
 	if err != nil {
 		b.release()
 		b.send(chatID, "Не удалось скачать файл: "+err.Error())
@@ -331,7 +339,10 @@ func (b *Bot) sendAttachment(ctx context.Context, chatID int64, fileID, filename
 // Bot API в --local-режиме, когда файл не попал в локальное хранилище, либо
 // локальный сервер — просто прокси, а файл лежит в облаке), повторяем
 // запрос напрямую к api.telegram.org.
-func (b *Bot) downloadFile(ctx context.Context, fileID string) ([]byte, error) {
+//
+// onProgress (если не nil) вызывается в ходе HTTP-загрузки с числом скачанных
+// и общих байт, что позволяет показывать прогресс в статус-сообщении.
+func (b *Bot) downloadFile(ctx context.Context, fileID string, onProgress func(downloaded, total int64)) ([]byte, error) {
 	file, err := b.api.GetFile(ctx, &telego.GetFileParams{FileID: fileID})
 	if err != nil {
 		return nil, fmt.Errorf("get file info: %w", err)
@@ -346,6 +357,9 @@ func (b *Bot) downloadFile(ctx context.Context, fileID string) ([]byte, error) {
 	// volume (telegram-bot-api-data → /var/lib/telegram-bot-api).
 	if b.cfg != nil && b.cfg.TelegramLocalAPIURL != "" {
 		if data, rerr := os.ReadFile(file.FilePath); rerr == nil {
+			if onProgress != nil {
+				onProgress(int64(len(data)), int64(len(data)))
+			}
 			return data, nil
 		} else {
 			slog.Warn("локальное чтение файла не удалось, пробуем HTTP", "path", file.FilePath, "error", rerr)
@@ -360,7 +374,7 @@ func (b *Bot) downloadFile(ctx context.Context, fileID string) ([]byte, error) {
 
 	var lastErr error
 	for _, url := range urls {
-		data, derr := b.downloadFromURL(ctx, url)
+		data, derr := b.downloadFromURL(ctx, url, file.FileSize, onProgress)
 		if derr == nil {
 			return data, nil
 		}
@@ -371,8 +385,10 @@ func (b *Bot) downloadFile(ctx context.Context, fileID string) ([]byte, error) {
 }
 
 // downloadFromURL выполняет GET-запрос и возвращает тело ответа либо ошибку
-// с HTTP-статусом при неуспехе.
-func (b *Bot) downloadFromURL(ctx context.Context, url string) ([]byte, error) {
+// с HTTP-статусом при неуспехе. totalHint — размер файла из метаданных
+// Telegram (FileSize), используется, когда сервер не отдаёт Content-Length.
+// onProgress (если не nil) вызывается по мере скачивания.
+func (b *Bot) downloadFromURL(ctx context.Context, url string, totalHint int64, onProgress func(downloaded, total int64)) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build download request: %w", err)
@@ -386,7 +402,43 @@ func (b *Bot) downloadFromURL(ctx context.Context, url string) ([]byte, error) {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return nil, fmt.Errorf("download: неожиданный статус %d: %s", resp.StatusCode, string(body))
 	}
-	return io.ReadAll(resp.Body)
+
+	total := resp.ContentLength
+	if total <= 0 && totalHint > 0 {
+		total = int64(totalHint)
+	}
+
+	reader := &progressReader{r: resp.Body, total: total, onProgress: onProgress}
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, fmt.Errorf("download: %w", err)
+	}
+	return data, nil
+}
+
+// progressReader обёртывает io.Reader и сообщает о прогрессе скачивания, как
+// в transcriber-bot. Обновления дедуплицируются (~5 МиБ), чтобы не спамить
+// редактированием статус-сообщения в Telegram.
+type progressReader struct {
+	r            io.Reader
+	total        int64
+	onProgress   func(downloaded, total int64)
+	downloaded   int64
+	lastReported int64
+}
+
+func (p *progressReader) Read(buf []byte) (int, error) {
+	n, err := p.r.Read(buf)
+	if n > 0 {
+		p.downloaded += int64(n)
+		if p.onProgress != nil {
+			if p.total <= 0 || p.downloaded-p.lastReported >= 5*1024*1024 || p.downloaded == p.total {
+				p.lastReported = p.downloaded
+				p.onProgress(p.downloaded, p.total)
+			}
+		}
+	}
+	return n, err
 }
 
 // convertAudioToWAV перегоняет скачанное аудио в WAV 16k mono через ffmpeg.
@@ -407,4 +459,27 @@ func convertAudioToWAV(ctx context.Context, data []byte) ([]byte, error) {
 		return nil, fmt.Errorf("ffmpeg: %w: %s", err, stderr.String())
 	}
 	return out.Bytes(), nil
+}
+
+// formatDownloadStatus формирует текст статуса скачивания для голосового,
+// кружочка и прочих вложений, как в transcriber-bot.
+func formatDownloadStatus(downloaded, total int64, noun string) string {
+	if total > 0 {
+		percent := float64(downloaded) / float64(total) * 100
+		return fmt.Sprintf("⏳ Скачиваю %s... %.0f%%", noun, percent)
+	}
+	return fmt.Sprintf("⏳ Скачиваю %s... %s", noun, formatBytes(downloaded))
+}
+
+func formatBytes(size int64) string {
+	const unit = 1024
+	if size < unit {
+		return fmt.Sprintf("%d B", size)
+	}
+	div, exp := int64(unit), 0
+	for n := size / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(size)/float64(div), "KMGTPE"[exp])
 }
