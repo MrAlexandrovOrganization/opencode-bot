@@ -187,6 +187,13 @@ func (c *Client) Events(ctx context.Context, fn func(Event)) error {
 	}
 	defer conn.CloseNow()
 
+	// Лимит чтения одного WS-сообщения по умолчанию — 32 КБ; крупные события
+	// (большие parts, длинный reasoning, tool-инпуты) эквивалентно рвут
+	// соединение, а события за время реконнекта теряются без реплея — в том
+	// числе финальный message.updated. Поднимаем лимит до максимума,
+	// который шлюз допускает в одном SSE-событии.
+	conn.SetReadLimit(8 << 20)
+
 	for {
 		_, data, err := conn.Read(ctx)
 		if err != nil {

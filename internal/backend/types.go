@@ -139,10 +139,12 @@ func (m *Message) MessageError() string {
 
 // StoredMessage — сообщение из истории шлюза (GET /api/v1/sessions/{id}/messages/{mid}).
 type StoredMessage struct {
-	ID     string          `json:"id"`
-	Role   string          `json:"role"`
-	Status string          `json:"status"`
-	Parts  json.RawMessage `json:"parts"`
+	ID        string          `json:"id"`
+	Role      string          `json:"role"`
+	Status    string          `json:"status"`
+	Parts     json.RawMessage `json:"parts"`
+	Info      json.RawMessage `json:"info,omitempty"`
+	CreatedAt time.Time       `json:"createdAt"`
 }
 
 // Text возвращает склеенный текст текстовых частей сообщения.

@@ -24,8 +24,11 @@ const maxMessageLen = 4000
 
 // stallTimeout — если от шлюза нет событий дольше этого времени и финальное
 // message.updated так и не пришло, превью принудительно завершается, чтобы
-// сообщение с курсором не висело в чате вечно (иллюзия зависания).
-const stallTimeout = 120 * time.Second
+// сообщение с курсором не висело в чате вечно (иллюзия зависания). Значение
+// намеренно заметно больше обычных пауз (долгий тихий tool без streaming,
+// медленная модель), чтобы не рушить живые запросы; потерянный финал
+// дофинализируется из истории шлюза в resolveStall.
+const stallTimeout = 5 * time.Minute
 
 // Bot is the main application struct.
 type Bot struct {
@@ -76,6 +79,7 @@ type Stream struct {
 	done         chan struct{} // closed when the response is finalizing
 	stopped      chan struct{} // closed by the preview loop when it exits
 	finalizeOnce sync.Once
+	started      time.Time // время начала запроса — для привязки ответа в истории
 	lastActivity time.Time // последнее событие от шлюза (part), для страховки зависания
 }
 
@@ -87,9 +91,16 @@ func (st *Stream) touch() {
 }
 
 // stalled возвращает true, если давно (stallTimeout) не было событий от шлюза
-// и финал так и не пришёл — значит, событие message.updated, скорее всего,
-// потерялось, и превью с курсором зависло бы навсегда.
-func (st *Stream) stalled() bool {
+// и финал так и не пришёл. Ожидание ответа пользователя (permission/question)
+// зависанием не считается: это легитимная пауза, событий от шлюза в ней и не
+// должно быть.
+func (b *Bot) stalled(st *Stream) bool {
+	b.mu.Lock()
+	waitingOnUser := len(b.perms) > 0 || b.pendingQ != nil
+	b.mu.Unlock()
+	if waitingOnUser {
+		return false
+	}
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	if st.lastActivity.IsZero() {
@@ -233,7 +244,12 @@ func (b *Bot) release() {
 func (b *Bot) beginStream(chatID int64, messageID int) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.stream = &Stream{chatID: chatID, messageID: messageID, lastActivity: time.Now()}
+	b.stream = &Stream{
+		chatID:       chatID,
+		messageID:    messageID,
+		started:      time.Now(),
+		lastActivity: time.Now(),
+	}
 }
 
 func (b *Bot) endStream() {
@@ -523,31 +539,70 @@ func (b *Bot) startRequest(ctx context.Context, chatID int64, req backend.Messag
 // and the token/cost footer. Idempotent — runs exactly once per request.
 func (b *Bot) finishStream(st *Stream, info backend.Message, errText string) {
 	st.finalizeOnce.Do(func() {
-		if st.done != nil {
-			close(st.done)
-		}
-		if st.stopped != nil {
-			<-st.stopped
-		}
-		if errText != "" {
-			b.editMessage(context.Background(), st.chatID, st.messageID, truncate(errText))
-		} else {
-			text := b.finalText(st, info)
+		toolLog := b.toolLog()
+		reasoning := b.reasoningLog()
+		var text string
+		if errText == "" {
+			text = b.finalText(st, info)
+			if text == "" {
+				text = b.partialText()
+			}
 			if text == "" {
 				text = "✅ Готово."
 			}
-			b.sendFinalResponse(context.Background(), st.chatID, st.messageID, text, info, b.toolLog(), b.reasoningLog())
 		}
-		b.endStream()
-		b.release()
-		// Запрос завершён (в т.ч. по таймауту/ошибке): любые висящие вопрос
-		// и запросы разрешений устарели, чтобы не съедать следующее
-		// сообщение пользователя как «ответ» на мёртвый вопрос.
-		b.mu.Lock()
-		b.pendingQ = nil
-		b.perms = make(map[string]*permAsk)
-		b.mu.Unlock()
+		b.finishCommon(st)
+		if errText != "" {
+			b.editMessage(context.Background(), st.chatID, st.messageID, truncate(errText))
+			return
+		}
+		b.sendFinalResponse(context.Background(), st.chatID, st.messageID, text, info, toolLog, reasoning)
 	})
+}
+
+// finishStalled финализирует превью после «догонялки» за потерянным финалом:
+// текст и метаданные ответа уже получены из истории шлюза, а не из стрима.
+// Idempotent, как и finishStream — гонку с поздним message.updated выигрывает
+// первый финализатор.
+func (b *Bot) finishStalled(st *Stream, text string, info backend.Message, errText string) {
+	st.finalizeOnce.Do(func() {
+		toolLog := b.toolLog()
+		reasoning := b.reasoningLog()
+		if errText == "" {
+			if strings.TrimSpace(text) == "" {
+				text = b.partialText()
+			}
+			if strings.TrimSpace(text) == "" {
+				text = "✅ Готово."
+			}
+		}
+		b.finishCommon(st)
+		if errText != "" {
+			b.editMessage(context.Background(), st.chatID, st.messageID, truncate(errText))
+			return
+		}
+		b.sendFinalResponse(context.Background(), st.chatID, st.messageID, text, info, toolLog, reasoning)
+	})
+}
+
+// finishCommon выполняет общую часть финализации: останавливает превью и
+// освобождает состояние запроса ровно один раз.
+func (b *Bot) finishCommon(st *Stream) {
+	if st.done != nil {
+		close(st.done)
+	}
+	if st.stopped != nil {
+		<-st.stopped
+	}
+	b.endStream()
+	b.release()
+	// Запрос завершён (в т.ч. по таймауту/ошибке): любые висящие вопрос
+	// и запросы разрешений устарели, чтобы не съедать следующее
+	// сообщение пользователя как «ответ» на мёртвый вопрос.
+	b.mu.Lock()
+	b.pendingQ = nil
+	b.perms = make(map[string]*permAsk)
+	b.mu.Unlock()
 }
 
 // previewLoop keeps the placeholder up to date with the stream state.
@@ -575,11 +630,13 @@ func (b *Bot) previewLoop(st *Stream, chatID int64) {
 					"💭 <i>выполняется…</i>\n\n"+truncate(curr))
 				last = curr
 			}
-			// Страховка: шлюз давно не отвечал и финал не пришёл — зависаем
-			// превью, иначе сообщение с курсором осталось бы в чате навсегда.
-			if st.stalled() {
-				go b.finishStream(st, backend.Message{},
-					"⚠️ Ответ не финализирован шлюзом (нет события message.updated) — превью остановлено.")
+			// Страховка: шлюз давно не отвечал и финал не пришёл. Сначала
+			// «догоняемся» за историей шлюза — обычно финал потерялся на сети
+			// (обрыв WS/SSE без реплея) и ответ уже сохранён, — и только если
+			// готового ответа нет, завершаем превью предупреждением (иначе
+			// сообщение с курсором осталось бы в чате навсегда).
+			if b.stalled(st) {
+				go b.resolveStall(st)
 				return
 			}
 		}
@@ -597,6 +654,62 @@ func (b *Bot) timeoutLoop(st *Stream) {
 	case <-timer.C:
 		b.finishStream(st, backend.Message{}, "❌ Превышено время ожидания ответа")
 	}
+}
+
+// resolveStall вызывается, когда шлюз молчит дольше stallTimeout и финальный
+// message.updated так и не пришёл. Обычно финал теряется на сети (обрыв
+// WebSocket/SSE без реплея), и ответ при этом уже сохранён в истории шлюза —
+// дофинализируем его настоящим текстом, а не ошибкой. Если после нескольких
+// попыток готового ответа в истории нет — запрос завершается штатным
+// предупреждением.
+func (b *Bot) resolveStall(st *Stream) {
+	if sessionID := b.currentSessionID(); sessionID != "" {
+		for i := 0; i < 10; i++ {
+			msgs, err := b.backend.ListMessages(context.Background(), sessionID)
+			if err == nil {
+				if m := lastAssistantResult(msgs, st.started); m != nil {
+					var info backend.Message
+					if len(m.Info) > 0 {
+						_ = json.Unmarshal(m.Info, &info)
+					}
+					if m.Status == "completed" {
+						slog.Info("stall resolved: response completed in history", "message_id", m.ID)
+						b.finishStalled(st, m.Text(), info, "")
+					} else {
+						errMsg := info.MessageError()
+						if errMsg == "" {
+							errMsg = "Ответ не сохранился в истории шлюза"
+						}
+						b.finishStalled(st, "", backend.Message{}, "❌ "+errMsg)
+					}
+					return
+				}
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+	}
+	b.finishStalled(st, "", backend.Message{},
+		"⚠️ Ответ не финализирован шлюзом (нет события message.updated) — превью остановлено.")
+}
+
+// lastAssistantResult возвращает последнее завершённое (или упавшее) сообщение
+// ассистента в истории, созданное после начала запроса. Бот серийный, поэтому
+// такое сообщение принадлежит именно текущему запросу. nil — ответа ещё нет.
+func lastAssistantResult(msgs []backend.StoredMessage, since time.Time) *backend.StoredMessage {
+	var best *backend.StoredMessage
+	for i := range msgs {
+		m := &msgs[i]
+		if m.Role != "assistant" || m.Status == "pending" {
+			continue
+		}
+		if m.CreatedAt.Before(since) {
+			continue
+		}
+		if best == nil || m.CreatedAt.After(best.CreatedAt) {
+			best = m
+		}
+	}
+	return best
 }
 
 func (b *Bot) partialText() string {
