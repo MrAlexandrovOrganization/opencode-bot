@@ -626,8 +626,10 @@ func (b *Bot) previewLoop(st *Stream, chatID int64) {
 			curr := b.previewText()
 			if curr != last && curr != "" {
 				// Явная метка «черновик», без двусмысленного курсора ▌.
-				b.editMessage(context.Background(), chatID, st.messageID,
-					"💭 <i>выполняется…</i>\n\n"+truncate(curr))
+				// Метка и динамический текст уходят в HTML-режиме, поэтому
+				// live-контент экранируем, чтобы `<i>` не печатался как есть.
+				b.editMessageHTML(context.Background(), chatID, st.messageID,
+					"💭 <i>выполняется…</i>\n\n"+escapeHTML(truncate(curr)))
 				last = curr
 			}
 			// Страховка: шлюз давно не отвечал и финал не пришёл. Сначала
