@@ -1,5 +1,26 @@
+# syntax=docker/dockerfile:1
+
 # opencode server — standalone opencode binary from GitHub Releases.
 # There is no official public image, so we download the release build.
+ARG GO_VERSION=1.26.6
+
+FROM golang:${GO_VERSION}-alpine AS tools
+
+RUN apk add --no-cache ca-certificates git
+
+ENV CGO_ENABLED=0
+
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    set -eux; \
+    GOBIN=/out go install github.com/bufbuild/buf/cmd/buf@v1.67.0; \
+    GOBIN=/out go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11; \
+    GOBIN=/out go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.1; \
+    GOBIN=/out go install github.com/a-h/templ/cmd/templ@v0.3.1020; \
+    GOBIN=/out go install github.com/pressly/goose/v3/cmd/goose@v3.19.2; \
+    GOBIN=/out go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.1; \
+    GOBIN=/out go install github.com/fullstorydev/grpcurl/cmd/grpcurl@v1.9.1
+
 FROM ubuntu:24.04 AS download
 
 ARG TARGETARCH
@@ -48,22 +69,8 @@ RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${TARGETARCH}.tar.gz" -o
     && tar -C /usr/local -xzf /tmp/go.tgz \
     && rm /tmp/go.tgz
 
-# Dev tools the project Makefiles expect, baked into the image so they survive
-# container recreation: buf + Go protoc plugins, templ, goose, golangci-lint,
-# grpcurl.
-ENV GOPATH=/go \
-    GOBIN=/usr/local/bin \
-    GOCACHE=/tmp/gocache \
-    GOMODCACHE=/go/pkg/mod
-RUN set -eux; \
-    /usr/local/go/bin/go install github.com/bufbuild/buf/cmd/buf@v1.67.0; \
-    /usr/local/go/bin/go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11; \
-    /usr/local/go/bin/go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.1; \
-    /usr/local/go/bin/go install github.com/a-h/templ/cmd/templ@v0.3.1020; \
-    /usr/local/go/bin/go install github.com/pressly/goose/v3/cmd/goose@latest; \
-    /usr/local/go/bin/go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest; \
-    /usr/local/go/bin/go install github.com/fullstorydev/grpcurl/cmd/grpcurl@v1.9.1; \
-    rm -rf /go /tmp/gocache
+COPY --from=tools /out/buf /out/protoc-gen-go /out/protoc-gen-go-grpc \
+    /out/templ /out/goose /out/golangci-lint /out/grpcurl /usr/local/bin/
 
 COPY --from=download /usr/local/bin/opencode /usr/local/bin/opencode
 # Entrypoint that sets git identity from GIT_USER_NAME / GIT_USER_EMAIL env.
