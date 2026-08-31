@@ -9,6 +9,8 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+
+	"go.opentelemetry.io/otel/trace"
 )
 
 const masked = "***"
@@ -47,6 +49,7 @@ func New(opts Options) *slog.Logger {
 		h = h.WithAttrs([]slog.Attr{slog.String("service", opts.Service)})
 	}
 	h = NewRedactHandler(h, opts.Secrets...)
+	h = NewTraceHandler(h)
 	return slog.New(h)
 }
 
@@ -96,6 +99,14 @@ func NewRedactHandler(h slog.Handler, secrets ...string) slog.Handler {
 	return &RedactHandler{Handler: h, secrets: filtered}
 }
 
+func (h *RedactHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return &RedactHandler{Handler: h.Handler.WithAttrs(attrs), secrets: h.secrets}
+}
+
+func (h *RedactHandler) WithGroup(name string) slog.Handler {
+	return &RedactHandler{Handler: h.Handler.WithGroup(name), secrets: h.secrets}
+}
+
 func (h *RedactHandler) Handle(ctx context.Context, r slog.Record) error {
 	redacted := slog.NewRecord(r.Time, r.Level, mask(r.Message, h.secrets), r.PC)
 	r.Attrs(func(a slog.Attr) bool {
@@ -123,4 +134,35 @@ func mask(s string, secrets []string) string {
 		s = strings.ReplaceAll(s, sec, masked)
 	}
 	return s
+}
+
+// TraceHandler adds the active OpenTelemetry span context to each record.
+type TraceHandler struct {
+	slog.Handler
+}
+
+// NewTraceHandler wraps h and adds trace_id, span_id, and trace_flags when the
+// context contains a valid span context.
+func NewTraceHandler(h slog.Handler) slog.Handler {
+	return &TraceHandler{Handler: h}
+}
+
+func (h *TraceHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return &TraceHandler{Handler: h.Handler.WithAttrs(attrs)}
+}
+
+func (h *TraceHandler) WithGroup(name string) slog.Handler {
+	return &TraceHandler{Handler: h.Handler.WithGroup(name)}
+}
+
+func (h *TraceHandler) Handle(ctx context.Context, r slog.Record) error {
+	sc := trace.SpanContextFromContext(ctx)
+	if sc.IsValid() {
+		r.AddAttrs(
+			slog.String("trace_id", sc.TraceID().String()),
+			slog.String("span_id", sc.SpanID().String()),
+			slog.String("trace_flags", sc.TraceFlags().String()),
+		)
+	}
+	return h.Handler.Handle(ctx, r)
 }

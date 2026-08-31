@@ -2,10 +2,13 @@ package logx
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"log/slog"
 	"strings"
 	"testing"
+
+	"go.opentelemetry.io/otel/trace"
 )
 
 func capture(t *testing.T, level slog.Level) (*bytes.Buffer, *slog.Logger) {
@@ -62,6 +65,11 @@ func TestRecordShape(t *testing.T) {
 			t.Errorf("missing standard field %q in %v", key, rec)
 		}
 	}
+	for _, key := range []string{"trace_id", "span_id", "trace_flags"} {
+		if _, ok := rec[key]; ok {
+			t.Errorf("trace field %q present without a span: %v", key, rec)
+		}
+	}
 	if rec["level"] != "INFO" || rec["service"] != "test-svc" {
 		t.Errorf("unexpected record: %v", rec)
 	}
@@ -103,6 +111,37 @@ func TestLevelFromEnv(t *testing.T) {
 		got, err := levelFromEnv()
 		if err != nil || got != want {
 			t.Errorf("LOG_LEVEL=%q: got (%v, %v), want %v", in, got, err, want)
+		}
+	}
+}
+
+func TestTraceContextFields(t *testing.T) {
+	buf, l := capture(t, slog.LevelInfo)
+	traceID, err := trace.TraceIDFromHex("4bf92f3577b34da6a3ce929d0e0e4736")
+	if err != nil {
+		t.Fatal(err)
+	}
+	spanID, err := trace.SpanIDFromHex("00f067aa0ba902b7")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := trace.ContextWithSpanContext(context.Background(), trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    traceID,
+		SpanID:     spanID,
+		TraceFlags: trace.FlagsSampled,
+		Remote:     false,
+	}))
+
+	l.InfoContext(ctx, "with trace")
+	l.ErrorContext(ctx, "with trace error")
+
+	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("bad json: %v", err)
+		}
+		if rec["trace_id"] != traceID.String() || rec["span_id"] != spanID.String() || rec["trace_flags"] != "01" {
+			t.Errorf("unexpected trace fields: %v", rec)
 		}
 	}
 }
