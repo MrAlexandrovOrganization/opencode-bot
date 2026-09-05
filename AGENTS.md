@@ -132,14 +132,20 @@ agents/                      — документы для дальнейшей 
 
 - `make up` / `make down` / `make logs` / `make restart` / `make deploy` — docker compose
 - `make server` — пересборка и старт только opencode-server
-- `make test` — `go test ./cmd/... ./internal/...`
-- `make lint` — проверка `gofmt -l` (не `go vet`, не golangci)
+- `make test` — юнит-тесты Go-пакетов
+- `make fmt-check` — проверка форматирования без изменения файлов
+- `make lint` — `go vet` по пакетам бота
+- `make check` — полный локальный gate: форматирование, lint и тесты
 - `make format` — `gofmt -w`
 - `make cover` — покрытие
 - `make proto` — синхронизация `proto/whisper.proto` из `backends/transcriber`
   и регенерация стабов (`make install` для плагинов + protoc)
 
 **Перед сдачей изменений:** `make lint` и `make test`.
+
+Размер входящих Telegram-файлов ограничен 100 МиБ до конвертации и загрузки в
+шлюз. Стандартный Compose монтирует SSH deploy-ключ в контейнер сервера, если
+ключ существует на хосте и задан `GIT_DEPLOY_KEY_PATH`.
 
 ## Конвенции
 

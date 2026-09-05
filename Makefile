@@ -44,18 +44,19 @@ deploy:
 format:
 	gofmt -w ./cmd ./internal
 
-.PHONY: lint
+.PHONY: fmt-check lint check
+fmt-check:
+	@files=$$(gofmt -l ./cmd ./internal) || { echo "gofmt failed"; exit 1; }; \
+	if [ -n "$$files" ]; then echo "Files need formatting:"; printf '%s\n' "$$files"; exit 1; fi
+
 lint:
-	@if [ -n "$$(gofmt -l ./cmd ./internal)" ]; then \
-		echo "Files need formatting:"; \
-		gofmt -l ./cmd ./internal; \
-		exit 1; \
-	fi
 	go vet ./cmd/... ./internal/...
 
 .PHONY: test
 test:
 	go test $(GO_UNIT_PKGS)
+
+check: fmt-check lint test
 
 .PHONY: cover
 cover:

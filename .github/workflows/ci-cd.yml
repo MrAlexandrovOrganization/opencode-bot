@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   test:
     name: Lint & Test
@@ -16,16 +19,10 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.26"
+          go-version: "1.26.6"
 
-      - name: Install tools
-        run: make install
-
-      - name: Lint
-        run: make lint
-
-      - name: Test
-        run: make test
+      - name: Check
+        run: make check
 
   deploy:
     name: Deploy to VM

@@ -42,6 +42,19 @@ func TestMaskInMessageAndAttrs(t *testing.T) {
 	}
 }
 
+func TestRedactionPreservesAttributeTypes(t *testing.T) {
+	buf, l := capture(t, slog.LevelInfo)
+	l.Info("typed", "count", 42, "enabled", true)
+
+	var rec map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &rec); err != nil {
+		t.Fatalf("bad json: %v", err)
+	}
+	if rec["count"] != float64(42) || rec["enabled"] != true {
+		t.Fatalf("attribute types changed: %v", rec)
+	}
+}
+
 func TestEmptySecretIgnored(t *testing.T) {
 	h := slog.NewJSONHandler(&bytes.Buffer{}, nil)
 	if got := NewRedactHandler(h); got != slog.Handler(h) {

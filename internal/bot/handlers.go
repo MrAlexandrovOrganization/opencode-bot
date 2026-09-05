@@ -431,9 +431,16 @@ func (b *Bot) downloadFile(ctx context.Context, fileID string, onProgress func(d
 			return data, nil
 		}
 		lastErr = derr
-		slog.Warn("скачивание файла не удалось", "url", url, "error", derr)
+		slog.Warn("скачивание файла не удалось", "scheme", urlScheme(url), "error", derr)
 	}
 	return nil, lastErr
+}
+
+func urlScheme(rawURL string) string {
+	if i := strings.Index(rawURL, "://"); i > 0 {
+		return strings.ToLower(rawURL[:i])
+	}
+	return "unknown"
 }
 
 // downloadFromURL выполняет GET-запрос и возвращает тело ответа либо ошибку

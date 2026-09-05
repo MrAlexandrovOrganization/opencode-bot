@@ -21,6 +21,8 @@ var (
 	ErrSessionNotFound = errors.New("сессия не найдена")
 )
 
+const maxUploadSize = 100 << 20
+
 // Client — клиент REST + WebSocket к opencode-backend.
 type Client struct {
 	baseURL string
@@ -154,8 +156,13 @@ func (c *Client) UploadFile(ctx context.Context, filename, mime string, r io.Rea
 	if err != nil {
 		return "", err
 	}
-	if _, err := io.Copy(fw, r); err != nil {
+	limited := io.LimitReader(r, maxUploadSize+1)
+	n, err := io.Copy(fw, limited)
+	if err != nil {
 		return "", err
+	}
+	if n > maxUploadSize {
+		return "", fmt.Errorf("upload exceeds %d MiB limit", maxUploadSize>>20)
 	}
 	if err := mw.Close(); err != nil {
 		return "", err

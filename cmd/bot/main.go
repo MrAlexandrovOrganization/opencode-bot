@@ -20,6 +20,10 @@ import (
 )
 
 func main() {
+	// Инициализируем структурированный logger до любых прикладных сообщений.
+	// Значения токенов используются только для редактирования логов.
+	logx.Setup("opencode-bot", os.Getenv("BOT_TOKEN"), os.Getenv("BACKEND_TOKEN"))
+
 	cfg, err := config.Load()
 	if err != nil {
 		slog.Error("config", "error", err)
@@ -60,7 +64,6 @@ func main() {
 			os.Exit(1)
 		}
 
-		logx.Setup("opencode-bot", cfg.BotToken, cfg.BackendToken)
 		defer whisperClient.Close()
 		slog.Info("whisper configured", "host", cfg.WhisperGRPCHost, "port", cfg.WhisperGRPCPort)
 	}

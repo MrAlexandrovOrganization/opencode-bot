@@ -76,8 +76,8 @@ func levelFromEnv() (slog.Level, error) {
 	}
 }
 
-// RedactHandler wraps a slog.Handler and masks occurrences of secrets in all
-// logged messages, attribute values and nested groups.
+// RedactHandler wraps a slog.Handler and masks occurrences of secrets in
+// messages, string attributes and nested groups.
 type RedactHandler struct {
 	slog.Handler
 	secrets []string
@@ -125,7 +125,9 @@ func (h *RedactHandler) redactAttr(a slog.Attr) slog.Attr {
 		a.Value = slog.GroupValue(children...)
 		return a
 	}
-	a.Value = slog.StringValue(mask(a.Value.String(), h.secrets))
+	if a.Value.Kind() == slog.KindString {
+		a.Value = slog.StringValue(mask(a.Value.String(), h.secrets))
+	}
 	return a
 }
 

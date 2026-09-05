@@ -3,6 +3,7 @@
 # opencode server — standalone opencode binary from GitHub Releases.
 # There is no official public image, so we download the release build.
 ARG GO_VERSION=1.26.6
+ARG OPENCODE_VERSION=v1.18.29
 
 FROM golang:${GO_VERSION}-alpine AS tools
 
@@ -25,6 +26,7 @@ FROM ubuntu:24.04 AS download
 
 ARG TARGETARCH
 ARG OPENCODE_TARGET
+ARG OPENCODE_VERSION
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl xz-utils \
@@ -36,7 +38,7 @@ RUN case "${TARGETARCH}" in \
         *) echo "Unsupported target architecture: ${TARGETARCH}" >&2; exit 1 ;; \
     esac \
     && target="${OPENCODE_TARGET:-$default_target}" \
-    && url="https://github.com/anomalyco/opencode/releases/latest/download/opencode-${target}.tar.gz" \
+    && url="https://github.com/anomalyco/opencode/releases/download/${OPENCODE_VERSION}/opencode-${target}.tar.gz" \
     && curl -fsSL -o /tmp/opencode.tar.gz "$url" \
     && tar -xzf /tmp/opencode.tar.gz -C /usr/local/bin opencode \
     && chmod +x /usr/local/bin/opencode \
