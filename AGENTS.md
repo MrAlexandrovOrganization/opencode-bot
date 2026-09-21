@@ -48,6 +48,19 @@ permissions, вопросы, загрузка файлов) идёт через 
 Запуск: `make up` (сборка + старт opencode-server и opencode-bot),
 `make server` (только opencode-server). Шлюз поднимается отдельно в его репозитории.
 
+### Выборочный VPN на VM
+
+`docker-compose.override.yml` автоматически подключает **opencode-server** к
+внешней сети `vless-egress` (`10.245.77.2`, gateway priority 100) и задаёт DNS
+`10.245.77.1`. Перед `make up` нужна подготовленная инфраструктура
+`infra/network/vless-client`; её инструкции и откат — в соответствующем
+`README.md`. Сеть `whisper-net` сохраняется. На хосте выборочная маршрутизация
+направляет внешний трафик этой сети через `vless0`, а локальные сервисы остаются
+доступны напрямую. Без VPN внешний трафик выбранной сети блокируется.
+Для запуска без этого VM-specific override явно использовать
+`docker compose -f docker-compose.yml ...`. Не заменять незакоммиченные
+серверные правки основного Compose при применении VPN.
+
 ## Структура репозитория
 
 ```
@@ -74,6 +87,7 @@ internal/backend/types.go    — типы шлюза: Event, Message, Session, P
                                QuestionAsked, MessageRequest и пр.
 internal/whisper/client.go   — gRPC-клиент к сервису транскрибации (async-джобы)
 internal/config/config.go    — конфиг из env
+internal/telemetry/          — OpenTelemetry provider и OTLP/HTTP exporter
 gen/whisper/                 — сгенерированные proto-стабы (не редактировать руками)
 proto/whisper.proto          — канонический источник whisper.proto (копия из
                                backends/transcriber)
@@ -127,6 +141,7 @@ agents/                      — документы для дальнейшей 
 | `WHISPER_GRPC_HOST/PORT` | сервис транскрибации (пусто = голос отключён) |
 | `OPENCODE_USERNAME/PASSWORD` | Basic-auth к opencode-server (использует шлюз, а не бот) |
 | `GIT_USER_NAME/EMAIL` | git identity агента (в сервере) |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP/HTTP collector; по умолчанию `http://jaeger:4318`, Compose подключает бота к `jaeger-net` |
 
 ## Команды
 
@@ -167,7 +182,9 @@ agents/                      — документы для дальнейшей 
    но не рестарт шлюза).
 5. `internal/bot/update.go:47` — `answerQuestionText` перехватывает любой
    текст как ответ на вопрос (нет явного разделения).
-6. Нет rate-limiting, квот, логов запросов, метрик.
+6. Нет rate-limiting, квот и метрик. Есть JSON-логи и базовые OTel spans/
+   propagation HTTP и WebSocket; наличие этой инструментации не подтверждает
+   сквозной trace всех обработчиков Telegram и gRPC.
 
 ## Куда дальше
 

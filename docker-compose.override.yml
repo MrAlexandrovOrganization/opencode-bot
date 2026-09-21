@@ -1,0 +1,15 @@
+# Selective VLESS egress; provision infra/network/vless-client on the VM first.
+services:
+  opencode-server:
+    dns:
+      - 10.245.77.1
+    networks:
+      whisper-net: {}
+      vless-egress:
+        ipv4_address: 10.245.77.2
+        gw_priority: 100
+
+networks:
+  vless-egress:
+    external: true
+    name: vless-egress

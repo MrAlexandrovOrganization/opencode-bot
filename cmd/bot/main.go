@@ -14,6 +14,7 @@ import (
 	"opencode-bot/internal/bot"
 	"opencode-bot/internal/config"
 	"opencode-bot/internal/logx"
+	"opencode-bot/internal/telemetry"
 	"opencode-bot/internal/whisper"
 
 	"github.com/mymmrac/telego"
@@ -29,6 +30,18 @@ func main() {
 		slog.Error("config", "error", err)
 		os.Exit(1)
 	}
+	shutdownTelemetry, err := telemetry.Setup(context.Background())
+	if err != nil {
+		slog.Error("telemetry init", "error", err)
+		os.Exit(1)
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := shutdownTelemetry(ctx); err != nil {
+			slog.Error("telemetry shutdown", "error", err)
+		}
+	}()
 
 	httpClient := &http.Client{
 		Transport: &http.Transport{

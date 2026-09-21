@@ -75,9 +75,13 @@ services:
       # Shared Whisper gRPC service (backends/transcriber)
       WHISPER_GRPC_HOST: whisper-ingress
       WHISPER_GRPC_PORT: "50053"
+      OTEL_SERVICE_NAME: opencode-bot
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://jaeger:4318}
+      OTEL_PROPAGATORS: tracecontext
     networks:
       - telegram-net
       - whisper-net
+      - jaeger-net
     # Локальный Bot API-сервер хранит скачанные файлы (голос/видео/доки) на
     # диске; читаем их напрямую, минуя 404 от /file/ в --local режиме.
     volumes:
@@ -92,6 +96,9 @@ networks:
   whisper-net:
     external: true
     name: whisper-net
+  jaeger-net:
+    external: true
+    name: jaeger-net
 
 volumes:
   telegram-bot-api-data:

@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 )
 
 // Ошибки, которые бот должен различать.
@@ -186,8 +188,10 @@ func (c *Client) UploadFile(ctx context.Context, filename, mime string, r io.Rea
 // вызывает fn для каждого. Возвращает ошибку при обрыве соединения.
 func (c *Client) Events(ctx context.Context, fn func(Event)) error {
 	wsURL := "ws" + strings.TrimPrefix(c.baseURL, "http") + "/api/v1/ws?session=*"
+	wsHeaders := http.Header{"Authorization": {"Bearer " + c.token}}
+	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(wsHeaders))
 	conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
-		HTTPHeader: http.Header{"Authorization": {"Bearer " + c.token}},
+		HTTPHeader: wsHeaders,
 	})
 	if err != nil {
 		return fmt.Errorf("ws dial: %w", err)
@@ -242,6 +246,10 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any, wan
 
 // perform выполняет запрос с авторизацией и разбирает ответ.
 func (c *Client) perform(req *http.Request, out any, wantStatus int) (int, error) {
+	ctx, span := otel.Tracer("opencode-bot").Start(req.Context(), req.Method+" "+req.URL.Path)
+	defer span.End()
+	req = req.WithContext(ctx)
+	otel.GetTextMapPropagator().Inject(req.Context(), propagation.HeaderCarrier(req.Header))
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	resp, err := c.http.Do(req)
 	if err != nil {

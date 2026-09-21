@@ -11,7 +11,47 @@ import (
 	"testing"
 
 	"github.com/coder/websocket"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 )
+
+func TestClientPropagatesTraceWithoutChangingAuth(t *testing.T) {
+	previousProvider := otel.GetTracerProvider()
+	previousPropagator := otel.GetTextMapPropagator()
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	otel.SetTracerProvider(provider)
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+	t.Cleanup(func() {
+		_ = provider.Shutdown(context.Background())
+		otel.SetTracerProvider(previousProvider)
+		otel.SetTextMapPropagator(previousPropagator)
+	})
+	ctx, parent := provider.Tracer("test").Start(context.Background(), "request")
+	defer parent.End()
+	var received trace.SpanContext
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received = trace.SpanContextFromContext(propagation.TraceContext{}.Extract(r.Context(), propagation.HeaderCarrier(r.Header)))
+		if r.Header.Get("Authorization") != "Bearer synthetic-test-token" {
+			t.Error("инструментирование изменило авторизацию")
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	if err := New(srv.URL, "synthetic-test-token").DeleteSession(ctx, "synthetic-session"); err != nil {
+		t.Fatal(err)
+	}
+	if !received.IsValid() || received.TraceID() != parent.SpanContext().TraceID() {
+		t.Fatal("HTTP-запрос потерял родительский trace")
+	}
+	ended := recorder.Ended()
+	if len(ended) != 1 || ended[0].Parent().SpanID() != parent.SpanContext().SpanID() || ended[0].SpanContext().SpanID() != received.SpanID() {
+		t.Fatal("исходящий span не завершён или неверно связан с родителем")
+	}
+}
 
 func TestClientAuthHeader(t *testing.T) {
 	var gotAuth string

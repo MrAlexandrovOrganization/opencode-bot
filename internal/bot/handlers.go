@@ -195,7 +195,7 @@ func (b *Bot) handleVoice(msg *telego.Message) {
 // the result, обновляя статус-сообщение по стадиям и показывая кнопку
 // «Отменить» (как в transcriber-bot).
 func (b *Bot) transcribeVoice(ctx context.Context, data []byte, format string, chatID int64, statusMsgID int) (string, error) {
-	jobID, pos, err := b.whisper.Submit(bytes.NewReader(data), format, nil)
+	jobID, pos, err := b.whisper.SubmitContext(ctx, bytes.NewReader(data), format, nil)
 	if err != nil {
 		if _, ok := err.(*whisper.UnavailableError); ok {
 			return "", fmt.Errorf("сервис транскрибации недоступен")
@@ -226,15 +226,16 @@ func (b *Bot) transcribeVoice(ctx context.Context, data []byte, format string, c
 	for {
 		select {
 		case <-ctx.Done():
-			_, _ = b.whisper.Cancel(jobID)
+			// Отправляем отмену отдельным ограниченным RPC, даже если запрос уже отменён.
+			_, _ = b.whisper.CancelContext(context.WithoutCancel(ctx), jobID)
 			return "", errTranscriptionCancelled
 		case <-deadline:
-			_, _ = b.whisper.Cancel(jobID)
+			_, _ = b.whisper.CancelContext(context.WithoutCancel(ctx), jobID)
 			return "", fmt.Errorf("превышено время ожидания расшифровки")
 		case <-ticker.C:
 		}
 
-		result, err := b.whisper.GetStatus(jobID)
+		result, err := b.whisper.GetStatusContext(ctx, jobID)
 		if err != nil {
 			return "", fmt.Errorf("get status: %w", err)
 		}

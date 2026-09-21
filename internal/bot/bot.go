@@ -278,7 +278,7 @@ func (b *Bot) Run(ctx context.Context) {
 	}
 	slog.Info("bot started", "username", b.api.Username(), "agent", b.agent)
 	for update := range updates {
-		go b.handleUpdate(update)
+		go b.handleUpdateContext(ctx, update)
 	}
 }
 

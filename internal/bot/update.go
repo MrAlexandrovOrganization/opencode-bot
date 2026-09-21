@@ -4,16 +4,24 @@ import (
 	"context"
 	"log/slog"
 
+	"go.opentelemetry.io/otel"
+
 	"github.com/mymmrac/telego"
 	tu "github.com/mymmrac/telego/telegoutil"
 )
 
 func (b *Bot) handleUpdate(update telego.Update) {
+	b.handleUpdateContext(context.Background(), update)
+}
+
+func (b *Bot) handleUpdateContext(parent context.Context, update telego.Update) {
+	ctx, span := otel.Tracer("opencode-bot").Start(parent, "telegram.update")
+	defer span.End()
 	if update.CallbackQuery != nil {
 		// Кнопки (вопросы/разрешения) доступны только авторизованному
 		// пользователю, как и обычные сообщения.
 		if update.CallbackQuery.From.ID != b.cfg.RootID {
-			_ = b.api.AnswerCallbackQuery(context.Background(), &telego.AnswerCallbackQueryParams{
+			_ = b.api.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{
 				CallbackQueryID: update.CallbackQuery.ID,
 				Text:            "Доступ запрещён",
 			})
