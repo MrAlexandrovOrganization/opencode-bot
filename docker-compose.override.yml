@@ -8,8 +8,12 @@ services:
       vless-egress:
         ipv4_address: 10.245.77.2
         gw_priority: 100
+      loki-net: {}
 
 networks:
   vless-egress:
     external: true
     name: vless-egress
+  loki-net:
+    external: true
+    name: loki-net
