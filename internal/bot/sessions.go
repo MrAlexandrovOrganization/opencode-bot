@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 
+	"opencode-bot/internal/backend"
+
 	"github.com/mymmrac/telego"
 	tu "github.com/mymmrac/telego/telegoutil"
 )
@@ -26,6 +28,14 @@ func (b *Bot) cmdSessions(msg *telego.Message) {
 	if len(sessions) == 0 {
 		b.sendHTML(msg.Chat.ID, "Сессий пока нет — напиши первое сообщение, и она создастся автоматически.", nil)
 		return
+	}
+	activities, err := b.backend.ListSessionActivities(ctx)
+	if err != nil {
+		slog.Warn("list session activities", "error", err)
+	}
+	activityBySession := make(map[string]backend.SessionActivity, len(activities))
+	for _, activity := range activities {
+		activityBySession[activity.SessionID] = activity
 	}
 
 	// Свежие сверху, показываем не более maxSessionsInList.
@@ -57,7 +67,10 @@ func (b *Bot) cmdSessions(msg *telego.Message) {
 			title = shortLine(s.ID, 24)
 		}
 		line := fmt.Sprintf("%s <code>%s</code> · 💬 %d · %s",
-			"▫️", escapeHTML(title), counts[i], s.CreatedAt.Format("02.01 15:04"))
+			sessionStateIcon(activityBySession[s.ID]), escapeHTML(title), counts[i], s.CreatedAt.Format("02.01 15:04"))
+		if status := activityBySession[s.ID].Status; status != "" {
+			line += " · " + escapeHTML(shortLine(status, 48))
+		}
 		if s.ID == current {
 			sb.WriteString("✅ " + line + " <b>(активна)</b>\n")
 		} else {
@@ -87,6 +100,19 @@ func (b *Bot) cmdSessions(msg *telego.Message) {
 	}
 
 	b.sendHTML(msg.Chat.ID, sb.String(), kb)
+}
+
+func sessionStateIcon(activity backend.SessionActivity) string {
+	switch activity.State {
+	case "running":
+		return "🟡"
+	case "waiting_permission":
+		return "🔐"
+	case "waiting_question":
+		return "❓"
+	default:
+		return "▫️"
+	}
 }
 
 // cmdRename переименовывает текущую сессию (title для списка /sessions).

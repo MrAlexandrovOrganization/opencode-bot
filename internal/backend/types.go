@@ -50,6 +50,20 @@ type Session struct {
 	CreatedAt time.Time `json:"createdAt"`
 }
 
+// SessionActivity — сводный статус сессии, которым backend делится со всеми
+// фронтендами. State отражает состояние шлюза, а OCStatus — сервер OpenCode.
+type SessionActivity struct {
+	SessionID   string    `json:"sessionID"`
+	State       string    `json:"state"`
+	Busy        bool      `json:"busy"`
+	Status      string    `json:"status"`
+	Partial     string    `json:"partial"`
+	Permissions []string  `json:"permissions"`
+	Question    bool      `json:"question"`
+	OCStatus    string    `json:"ocStatus"`
+	UpdatedAt   time.Time `json:"updatedAt"`
+}
+
 // PermissionAsked — запрос разрешения от агента.
 type PermissionAsked struct {
 	ID         string   `json:"id"`

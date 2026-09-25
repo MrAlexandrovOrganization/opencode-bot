@@ -141,16 +141,17 @@ type fakeBackend struct {
 	t   *testing.T
 	srv *httptest.Server
 
-	mu       sync.Mutex
-	gotMsg   []backend.MessageRequest // принятые send-message запросы
-	stored   map[string]string        // messageID -> тело StoredMessage (JSON)
-	replQ    [][][]string             // принятые answers на вопрос
-	created  int                      // сколько раз создавалась сессия
-	sessions []backend.Session        // выдаются в GET /api/v1/sessions
-	msgCount map[string]int           // sessionID -> число сообщений
-	resumed  []string                 // вызванные POST /resume
-	renamed  map[string]string        // sessionID -> новый title
-	deleted  []string                 // вызванные DELETE /sessions/{id}
+	mu         sync.Mutex
+	gotMsg     []backend.MessageRequest  // принятые send-message запросы
+	stored     map[string]string         // messageID -> тело StoredMessage (JSON)
+	replQ      [][][]string              // принятые answers на вопрос
+	created    int                       // сколько раз создавалась сессия
+	sessions   []backend.Session         // выдаются в GET /api/v1/sessions
+	activities []backend.SessionActivity // выдаются в GET /api/v1/sessions/activity
+	msgCount   map[string]int            // sessionID -> число сообщений
+	resumed    []string                  // вызванные POST /resume
+	renamed    map[string]string         // sessionID -> новый title
+	deleted    []string                  // вызванные DELETE /sessions/{id}
 
 	pushCh  chan []byte
 	wsReady chan struct{}
@@ -168,6 +169,7 @@ func newFakeBackend(t *testing.T) *fakeBackend {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v1/sessions", fb.handleCreateSession)
 	mux.HandleFunc("GET /api/v1/sessions", fb.handleListSessions)
+	mux.HandleFunc("GET /api/v1/sessions/activity", fb.handleListSessionActivities)
 	mux.HandleFunc("POST /api/v1/sessions/{id}/resume", fb.handleResumeSession)
 	mux.HandleFunc("PATCH /api/v1/sessions/{id}", fb.handleRenameSession)
 	mux.HandleFunc("GET /api/v1/sessions/{id}/empty", fb.handleSessionEmpty)
@@ -190,6 +192,13 @@ func (fb *fakeBackend) handleListSessions(w http.ResponseWriter, r *http.Request
 	sess := fb.sessions
 	fb.mu.Unlock()
 	writeJSON(w, sess)
+}
+
+func (fb *fakeBackend) handleListSessionActivities(w http.ResponseWriter, r *http.Request) {
+	fb.mu.Lock()
+	activities := append([]backend.SessionActivity(nil), fb.activities...)
+	fb.mu.Unlock()
+	writeJSON(w, activities)
 }
 
 func (fb *fakeBackend) handleListMessages(w http.ResponseWriter, r *http.Request) {

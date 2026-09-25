@@ -82,7 +82,8 @@ internal/bot/                — ТЕЛЕГРАМ-ЛОГИКА + движок в
 internal/backend/client.go   — тонкий HTTP+WS-клиент к opencode-backend (шлюз):
                                Health, CreateSession, SendMessage (async → messageID),
                                Abort, Get/Delete, ReplyPermission, ReplyQuestion,
-                               UploadFile (multipart), Events (WebSocket)
+                               UploadFile (multipart), activity всех сессий,
+                               Events (WebSocket)
 internal/backend/types.go    — типы шлюза: Event, Message, Session, PermissionAsked,
                                QuestionAsked, MessageRequest и пр.
 internal/whisper/client.go   — gRPC-клиент к сервису транскрибации (async-джобы)

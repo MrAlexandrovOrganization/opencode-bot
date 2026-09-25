@@ -87,6 +87,13 @@ func (c *Client) ListSessions(ctx context.Context) ([]Session, error) {
 	return out, err
 }
 
+// ListSessionActivities возвращает снимок статусов всех сессий пользователя.
+func (c *Client) ListSessionActivities(ctx context.Context) ([]SessionActivity, error) {
+	var out []SessionActivity
+	_, err := c.do(ctx, http.MethodGet, "/api/v1/sessions/activity", nil, &out, http.StatusOK)
+	return out, err
+}
+
 // ListMessages возвращает сообщения сессии. Пустая сессия — та, у которой
 // сообщений нет.
 func (c *Client) ListMessages(ctx context.Context, sessionID string) ([]StoredMessage, error) {

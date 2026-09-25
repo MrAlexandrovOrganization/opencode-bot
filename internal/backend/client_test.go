@@ -92,6 +92,25 @@ func TestCreateSession(t *testing.T) {
 	}
 }
 
+func TestListSessionActivities(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/sessions/activity" {
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `[{"sessionID":"s1","state":"running","busy":true,"status":"проверяю"}]`)
+	}))
+	defer srv.Close()
+
+	activities, err := New(srv.URL, "t").ListSessionActivities(context.Background())
+	if err != nil {
+		t.Fatalf("ListSessionActivities: %v", err)
+	}
+	if len(activities) != 1 || activities[0].SessionID != "s1" || activities[0].State != "running" || !activities[0].Busy {
+		t.Fatalf("activities = %+v", activities)
+	}
+}
+
 func TestSendMessage(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/sessions/s1/messages" {

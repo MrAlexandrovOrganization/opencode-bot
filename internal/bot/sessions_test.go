@@ -115,6 +115,7 @@ func TestCmdSessionsListsActiveAndCounts(t *testing.T) {
 	fb.sessions = twoSessions(time.Now().Add(-24 * time.Hour))
 	fb.msgCount["sess1"] = 5
 	fb.msgCount["sess2"] = 3
+	fb.activities = []backend.SessionActivity{{SessionID: "sess2", State: "running", Status: "проверяю тесты"}}
 	b := newTestBot(t, ft, fb)
 	b.mu.Lock()
 	b.sessionID = "sess1"
@@ -132,6 +133,9 @@ func TestCmdSessionsListsActiveAndCounts(t *testing.T) {
 	}
 	if !strings.Contains(joined, "💬 3") {
 		t.Fatalf("не посчитаны сообщения второй сессии: %q", joined)
+	}
+	if !strings.Contains(joined, "🟡") || !strings.Contains(joined, "проверяю тесты") {
+		t.Fatalf("не показан фоновый activity-статус: %q", joined)
 	}
 }
 
