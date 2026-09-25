@@ -141,17 +141,18 @@ type fakeBackend struct {
 	t   *testing.T
 	srv *httptest.Server
 
-	mu         sync.Mutex
-	gotMsg     []backend.MessageRequest  // принятые send-message запросы
-	stored     map[string]string         // messageID -> тело StoredMessage (JSON)
-	replQ      [][][]string              // принятые answers на вопрос
-	created    int                       // сколько раз создавалась сессия
-	sessions   []backend.Session         // выдаются в GET /api/v1/sessions
-	activities []backend.SessionActivity // выдаются в GET /api/v1/sessions/activity
-	msgCount   map[string]int            // sessionID -> число сообщений
-	resumed    []string                  // вызванные POST /resume
-	renamed    map[string]string         // sessionID -> новый title
-	deleted    []string                  // вызванные DELETE /sessions/{id}
+	mu          sync.Mutex
+	gotMsg      []backend.MessageRequest // принятые send-message запросы
+	gotCommands []struct{ Name, Arguments string }
+	stored      map[string]string         // messageID -> тело StoredMessage (JSON)
+	replQ       [][][]string              // принятые answers на вопрос
+	created     int                       // сколько раз создавалась сессия
+	sessions    []backend.Session         // выдаются в GET /api/v1/sessions
+	activities  []backend.SessionActivity // выдаются в GET /api/v1/sessions/activity
+	msgCount    map[string]int            // sessionID -> число сообщений
+	resumed     []string                  // вызванные POST /resume
+	renamed     map[string]string         // sessionID -> новый title
+	deleted     []string                  // вызванные DELETE /sessions/{id}
 
 	pushCh  chan []byte
 	wsReady chan struct{}
@@ -170,12 +171,14 @@ func newFakeBackend(t *testing.T) *fakeBackend {
 	mux.HandleFunc("POST /api/v1/sessions", fb.handleCreateSession)
 	mux.HandleFunc("GET /api/v1/sessions", fb.handleListSessions)
 	mux.HandleFunc("GET /api/v1/sessions/activity", fb.handleListSessionActivities)
+	mux.HandleFunc("GET /api/v1/commands", fb.handleListCommands)
 	mux.HandleFunc("POST /api/v1/sessions/{id}/resume", fb.handleResumeSession)
 	mux.HandleFunc("PATCH /api/v1/sessions/{id}", fb.handleRenameSession)
 	mux.HandleFunc("GET /api/v1/sessions/{id}/empty", fb.handleSessionEmpty)
 	mux.HandleFunc("DELETE /api/v1/sessions/{id}", fb.handleDeleteSession)
 	mux.HandleFunc("GET /api/v1/sessions/{id}/messages", fb.handleListMessages)
 	mux.HandleFunc("POST /api/v1/sessions/"+testSessID+"/messages", fb.handleSendMessage)
+	mux.HandleFunc("POST /api/v1/sessions/"+testSessID+"/commands", fb.handleRunCommand)
 	mux.HandleFunc("GET /api/v1/sessions/"+testSessID+"/messages/asm1", fb.handleGetMessage)
 	mux.HandleFunc("GET /api/v1/ws", fb.handleWS)
 	mux.HandleFunc("POST /api/v1/questions/{qid}", fb.handleReplyQuestion)
@@ -185,6 +188,10 @@ func newFakeBackend(t *testing.T) *fakeBackend {
 		fb.srv.Close()
 	})
 	return fb
+}
+
+func (fb *fakeBackend) handleListCommands(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, []backend.Command{{Name: "compact", Description: "Сжать контекст"}})
 }
 
 func (fb *fakeBackend) handleListSessions(w http.ResponseWriter, r *http.Request) {
@@ -330,6 +337,19 @@ func (fb *fakeBackend) handleSendMessage(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, map[string]any{"messageID": "req-1"})
 }
 
+func (fb *fakeBackend) handleRunCommand(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Command   string `json:"command"`
+		Arguments string `json:"arguments"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	fb.mu.Lock()
+	fb.gotCommands = append(fb.gotCommands, struct{ Name, Arguments string }{body.Command, body.Arguments})
+	fb.mu.Unlock()
+	w.WriteHeader(http.StatusAccepted)
+	writeJSON(w, map[string]string{"messageID": "cmd-1"})
+}
+
 func (fb *fakeBackend) handleGetMessage(w http.ResponseWriter, r *http.Request) {
 	fb.mu.Lock()
 	body := fb.stored["asm1"]
@@ -385,6 +405,12 @@ func (fb *fakeBackend) receivedMessages() int {
 	fb.mu.Lock()
 	defer fb.mu.Unlock()
 	return len(fb.gotMsg)
+}
+
+func (fb *fakeBackend) receivedCommands() []struct{ Name, Arguments string } {
+	fb.mu.Lock()
+	defer fb.mu.Unlock()
+	return append([]struct{ Name, Arguments string }(nil), fb.gotCommands...)
 }
 
 func (fb *fakeBackend) questionReplies() [][][]string {
@@ -496,6 +522,30 @@ func TestE2ETextMessage(t *testing.T) {
 	if !strings.Contains(joined, "⤴ 5 · ⤵ 10") {
 		t.Fatalf("футер токенов отсутствует: %q", joined)
 	}
+}
+
+func TestE2EOpenCodeSlashCommand(t *testing.T) {
+	ft := newFakeTelegram(t)
+	fb := newFakeBackend(t)
+	fb.stored["asm1"] = `{"id":"asm1","role":"assistant","status":"completed","parts":[{"type":"text","text":"Контекст сжат"}]}`
+	b := newTestBot(t, ft, fb)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go b.eventLoop(ctx)
+	select {
+	case <-fb.wsReady:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ws-подписка не поднялась")
+	}
+
+	b.handleUpdate(textUpdate("/compact keep latest"))
+	waitFor(t, func() bool { return len(fb.receivedCommands()) == 1 })
+	got := fb.receivedCommands()[0]
+	if got.Name != "compact" || got.Arguments != "keep latest" {
+		t.Fatalf("command = %+v", got)
+	}
+	fb.push(t, "message.updated", evFinal)
+	ft.waitText(t, "Контекст сжат")
 }
 
 // TestE2EBusyQueuesSecondRequest — пока запрос в полёте, второй текст

@@ -32,6 +32,14 @@ type MessageRequest struct {
 	Parts []PartInput `json:"parts"`
 }
 
+// Command — slash-команда, доступная в конфигурации OpenCode.
+type Command struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Agent       string `json:"agent,omitempty"`
+	Model       string `json:"model,omitempty"`
+}
+
 // AddText добавляет текстовую часть.
 func (m *MessageRequest) AddText(text string) {
 	m.Parts = append(m.Parts, PartInput{Type: "text", Text: text})

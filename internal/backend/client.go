@@ -135,6 +135,23 @@ func (c *Client) SendMessage(ctx context.Context, sessionID string, req MessageR
 	return out.MessageID, err
 }
 
+// ListCommands получает актуальные slash-команды OpenCode через шлюз.
+func (c *Client) ListCommands(ctx context.Context) ([]Command, error) {
+	var out []Command
+	_, err := c.do(ctx, http.MethodGet, "/api/v1/commands", nil, &out, http.StatusOK)
+	return out, err
+}
+
+// RunCommand асинхронно запускает slash-команду в сессии.
+func (c *Client) RunCommand(ctx context.Context, sessionID, command, arguments string) (string, error) {
+	var out struct {
+		MessageID string `json:"messageID"`
+	}
+	_, err := c.do(ctx, http.MethodPost, "/api/v1/sessions/"+sessionID+"/commands",
+		map[string]string{"command": command, "arguments": arguments}, &out, http.StatusAccepted)
+	return out.MessageID, err
+}
+
 // AbortSession прерывает выполняющийся запрос сессии.
 func (c *Client) AbortSession(ctx context.Context, id string) error {
 	_, err := c.do(ctx, http.MethodPost, "/api/v1/sessions/"+id+"/abort", nil, nil, http.StatusAccepted)

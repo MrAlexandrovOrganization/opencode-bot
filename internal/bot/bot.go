@@ -733,6 +733,36 @@ func (b *Bot) startRequest(ctx context.Context, chatID int64, req backend.Messag
 	go b.timeoutLoop(st)
 }
 
+// startCommandRequest повторяет lifecycle обычного запроса, но исполнение
+// команды оставляет OpenCode: именно он применяет шаблон, агента и аргументы.
+func (b *Bot) startCommandRequest(ctx context.Context, chatID int64, command, arguments string) {
+	_ = b.api.SendChatAction(ctx, &telego.SendChatActionParams{
+		ChatID: telego.ChatID{ID: chatID},
+		Action: "typing",
+	})
+	placeholder, err := b.api.SendMessage(ctx, tu.Message(tu.ID(chatID), "💭 Выполняю /"+command+"…"))
+	if err != nil {
+		b.release()
+		return
+	}
+	b.beginStream(chatID, placeholder.MessageID)
+	st := b.currentStream()
+	st.done = make(chan struct{})
+	st.stopped = make(chan struct{})
+	go b.previewLoop(st, chatID)
+
+	sessionID, err := b.sessionIDFor(ctx)
+	if err != nil {
+		b.finishStream(st, backend.Message{}, "❌ "+err.Error())
+		return
+	}
+	if _, err := b.backend.RunCommand(ctx, sessionID, command, arguments); err != nil {
+		b.finishStream(st, backend.Message{}, "❌ "+err.Error())
+		return
+	}
+	go b.timeoutLoop(st)
+}
+
 // finishStream stops the live preview and finalizes the placeholder. errText,
 // when non-empty, replaces the placeholder with an error; otherwise the
 // accumulated partial text is rendered together with the tool log, reasoning

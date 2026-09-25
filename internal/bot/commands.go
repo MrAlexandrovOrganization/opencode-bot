@@ -22,6 +22,8 @@ func (b *Bot) handleCommand(cmd string, msg *telego.Message) {
 		b.cmdHelp(msg)
 	case "reset":
 		b.cmdReset(msg)
+	case "new":
+		b.cmdNew(msg)
 	case "session":
 		b.cmdSession(msg)
 	case "sessions":
@@ -38,8 +40,10 @@ func (b *Bot) handleCommand(cmd string, msg *telego.Message) {
 		b.cmdModel(msg)
 	case "agent":
 		b.cmdAgent(msg)
+	case "commands":
+		b.cmdOpenCodeCommands(msg)
 	default:
-		b.send(msg.Chat.ID, "Неизвестная команда. /help — список команд.")
+		b.cmdOpenCodeCommand(cmd, msg)
 	}
 }
 
@@ -59,6 +63,7 @@ func (b *Bot) cmdHelp(msg *telego.Message) {
 /start — приветствие
 /help — этот список
 /reset — начать новую сессию opencode
+/new — новая сессия, не удаляя прежнюю (как в OpenCode)
 /session — информация о текущей сессии
 /sessions — список сессий и переключение между ними
 /rename <i>[название]</i> — переименовать текущую сессию
@@ -67,6 +72,7 @@ func (b *Bot) cmdHelp(msg *telego.Message) {
 /queue — показать ожидающие сообщения
 /model <i>[provider/model]</i> — показать или задать модель
 /agent <i>[name]</i> — показать или задать агента (build, plan, general, explore)
+/commands — команды, доступные в текущем OpenCode
 
 <b>Сообщения</b>
 
@@ -87,6 +93,59 @@ func (b *Bot) cmdHelp(msg *telego.Message) {
 <code>ask</code> приходит запрос с кнопками: разрешить один раз, всегда
 или отклонить. Поведение задаётся через <code>PERMISSION_MODE</code>
 (<code>ask</code> | <code>allow</code> | <code>deny</code>).`, nil)
+}
+
+// cmdNew создаёт и выбирает новую сессию, сохраняя историю прежних — это
+// соответствует действию session.new в OpenCode. Для старого поведения
+// удаления предыдущей сессии остаётся /reset.
+func (b *Bot) cmdNew(msg *telego.Message) {
+	b.mu.Lock()
+	busy := b.busy
+	b.mu.Unlock()
+	if busy {
+		b.send(msg.Chat.ID, "⏳ Дождись завершения текущего запроса, затем /new.")
+		return
+	}
+	id, err := b.newSession(context.Background())
+	if err != nil {
+		b.send(msg.Chat.ID, "Не удалось создать сессию: "+err.Error())
+		return
+	}
+	b.sendHTML(msg.Chat.ID, "Новая сессия создана: <code>"+escapeHTML(id)+"</code>", nil)
+}
+
+func (b *Bot) cmdOpenCodeCommands(msg *telego.Message) {
+	commands, err := b.backend.ListCommands(context.Background())
+	if err != nil {
+		b.send(msg.Chat.ID, "Не удалось получить команды OpenCode: "+err.Error())
+		return
+	}
+	if len(commands) == 0 {
+		b.send(msg.Chat.ID, "В текущей конфигурации OpenCode нет пользовательских slash-команд.")
+		return
+	}
+	var out strings.Builder
+	out.WriteString("<b>Команды OpenCode</b>")
+	for _, command := range commands {
+		out.WriteString("\n/" + escapeHTML(command.Name))
+		if desc := strings.TrimSpace(command.Description); desc != "" {
+			out.WriteString(" — " + escapeHTML(shortLine(desc, 180)))
+		}
+	}
+	b.sendHTML(msg.Chat.ID, out.String(), nil)
+}
+
+// cmdOpenCodeCommand передаёт незарезервированную Telegram-команду в OpenCode.
+// Это поддерживает команды из opencode.json без их дублирования в коде
+// Telegram-бота.
+func (b *Bot) cmdOpenCodeCommand(command string, msg *telego.Message) {
+	_, arguments, _ := tu.ParseCommand(msg.Text)
+	ctx, ok := b.beginRequest()
+	if !ok {
+		b.send(msg.Chat.ID, "⏳ Сессия занята. Дождись ответа или используй /detach.")
+		return
+	}
+	go b.startCommandRequest(ctx, msg.Chat.ID, command, strings.TrimSpace(arguments))
 }
 
 func (b *Bot) cmdReset(msg *telego.Message) {
