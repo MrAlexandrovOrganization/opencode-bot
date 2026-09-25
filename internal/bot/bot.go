@@ -54,6 +54,9 @@ type Bot struct {
 	perms     map[string]*permAsk // permissionID -> pending "ask" prompt
 	pendingQ  *pendingQuestions   // question the agent is awaiting an answer to
 	queued    []queuedText        // текстовые запросы, пришедшие во время выполнения
+	// background хранит компактные живые представления откреплённых сессий.
+	// Они не занимают foreground-стрим и потому могут обновляться параллельно.
+	background map[string]*backgroundStream
 
 	// activeJob — активная транскрибация Whisper, чтобы пользователь мог
 	// отменить её кнопкой «Отменить» (как в transcriber-bot). Единственная,
@@ -92,6 +95,20 @@ type Stream struct {
 	finalizeOnce sync.Once
 	started      time.Time // время начала запроса — для привязки ответа в истории
 	lastActivity time.Time // последнее событие от шлюза (part), для страховки зависания
+}
+
+// backgroundStream — Telegram-сообщение, которое служит "окном" в
+// откреплённую сессию. В отличие от Stream, оно показывает только последнюю
+// активность: полный ответ доступен после выбора сессии в /sessions.
+type backgroundStream struct {
+	chatID    int64
+	messageID int
+	title     string
+
+	mu       sync.Mutex
+	partial  string
+	status   string
+	lastSent time.Time
 }
 
 // touch фиксирует активность шлюза, сбрасывая таймер зависания.
@@ -143,6 +160,7 @@ func New(api *telego.Bot, backendClient *backend.Client, whisperClient *whisper.
 		httpClient: &http.Client{Timeout: 2 * time.Minute},
 		agent:      cfg.DefaultAgent,
 		perms:      make(map[string]*permAsk),
+		background: make(map[string]*backgroundStream),
 	}
 }
 
@@ -398,6 +416,7 @@ func (b *Bot) onMessagePartUpdated(ev backend.Event) {
 		return
 	}
 	if props.Part.SessionID != b.currentSessionID() {
+		b.updateBackgroundStream(props.Part.SessionID, props.Part.Type, props.Part.Text, props.Part.Tool, props.Part.State, props.Delta)
 		return
 	}
 	// Части user-эха (копия запроса пользователя) не должны попадать в стрим.
@@ -479,6 +498,10 @@ func (b *Bot) onMessageUpdated(ev backend.Event) {
 		sess = props.Info.SessionID
 	}
 	if sess != b.currentSessionID() {
+		if b.finishBackgroundStream(sess, props.SessionID, props.Info) {
+			return
+		}
+		b.notifyBackgroundCompletion(sess, props.SessionID, props.Info)
 		return
 	}
 	st := b.currentStream()
@@ -502,6 +525,119 @@ func (b *Bot) onMessageUpdated(ev backend.Event) {
 		return
 	}
 	b.finishStream(st, props.Info, "")
+}
+
+// updateBackgroundStream обновляет одно сообщение откреплённой сессии. Частые
+// WS-дельты намеренно сгруппированы: Telegram не принимает бесконечный поток
+// editMessageText и индикатор должен оставаться читаемым.
+func (b *Bot) updateBackgroundStream(sessionID, partType, text, tool string, state toolPartState, delta string) {
+	b.mu.Lock()
+	st := b.background[sessionID]
+	b.mu.Unlock()
+	if st == nil {
+		return
+	}
+
+	st.mu.Lock()
+	switch partType {
+	case "text":
+		st.status = ""
+		if delta != "" {
+			st.partial += delta
+		} else {
+			st.partial = text
+		}
+	case "tool":
+		switch state.Status {
+		case "pending", "running":
+			st.status = toolStatus(tool, state)
+		case "completed", "error":
+			st.status = ""
+		}
+	case "reasoning":
+		st.status = "💭 Агент обдумывает следующий шаг"
+	}
+	if time.Since(st.lastSent) < time.Second {
+		st.mu.Unlock()
+		return
+	}
+	st.lastSent = time.Now()
+	chatID, messageID, title, partial, status := st.chatID, st.messageID, st.title, st.partial, st.status
+	st.mu.Unlock()
+	b.editMessageHTML(context.Background(), chatID, messageID, backgroundProgressHTML(title, partial, status))
+}
+
+// finishBackgroundStream завершает именно ранее откреплённую сессию. true
+// означает, что это её финальное событие и обычное уведомление не нужно:
+// редактируемый индикатор сам стал уведомлением.
+func (b *Bot) finishBackgroundStream(sessionID, topLevelSessionID string, info backend.Message) bool {
+	if topLevelSessionID == "" || sessionID == "" || info.Role != "assistant" {
+		return false
+	}
+	b.mu.Lock()
+	st := b.background[sessionID]
+	if st != nil {
+		delete(b.background, sessionID)
+	}
+	b.mu.Unlock()
+	if st == nil {
+		return false
+	}
+
+	st.mu.Lock()
+	chatID, messageID, title := st.chatID, st.messageID, st.title
+	st.mu.Unlock()
+	if errText := info.MessageError(); errText != "" {
+		b.editMessageHTML(context.Background(), chatID, messageID,
+			"❌ Фоновая сессия <b>"+escapeHTML(title)+"</b> завершилась с ошибкой: "+escapeHTML(errText))
+		return true
+	}
+	text := ""
+	if info.ID != "" {
+		if msg, err := b.backend.GetMessage(context.Background(), sessionID, info.ID); err == nil {
+			text = msg.Text()
+		}
+	}
+	final := "✅ Фоновая сессия <b>" + escapeHTML(title) + "</b> завершилась."
+	if text = strings.TrimSpace(text); text != "" {
+		final += "\n\n" + escapeHTML(shortLine(text, 1500))
+	}
+	b.editMessageHTML(context.Background(), chatID, messageID, final)
+	return true
+}
+
+func backgroundProgressHTML(title, partial, status string) string {
+	text := strings.TrimSpace(partial)
+	if text == "" {
+		text = status
+	}
+	if text == "" {
+		text = "💭 Выполняется…"
+	}
+	return "📎 Фоновая сессия <b>" + escapeHTML(title) + "</b>\n" + escapeHTML(shortLine(text, 1500))
+}
+
+// notifyBackgroundCompletion сообщает о завершении сессии, от которой
+// frontend был откреплён. Только финальное событие шлюза содержит top-level
+// sessionID, поэтому промежуточные шаги и дубликаты не создают спам.
+func (b *Bot) notifyBackgroundCompletion(sessionID, topLevelSessionID string, info backend.Message) {
+	if topLevelSessionID == "" || sessionID == "" || info.Role != "assistant" {
+		return
+	}
+	title := sessionID
+	if sess, err := b.backend.GetSession(context.Background(), sessionID); err == nil && strings.TrimSpace(sess.Title) != "" {
+		title = sess.Title
+	}
+	text := "✅ Фоновая сессия <b>" + escapeHTML(title) + "</b> завершилась."
+	if errText := info.MessageError(); errText != "" {
+		text = "❌ Фоновая сессия <b>" + escapeHTML(title) + "</b> завершилась с ошибкой: " + escapeHTML(errText)
+	}
+	b.mu.Lock()
+	chatID := b.chatID
+	b.mu.Unlock()
+	if chatID != 0 {
+		b.sendHTML(chatID, text, nil)
+	}
 }
 
 // appendLog records a finished tool call, keeping a bounded history.

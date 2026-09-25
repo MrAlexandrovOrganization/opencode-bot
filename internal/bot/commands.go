@@ -30,6 +30,8 @@ func (b *Bot) handleCommand(cmd string, msg *telego.Message) {
 		b.cmdRename(msg)
 	case "abort":
 		b.cmdAbort(msg)
+	case "detach":
+		b.cmdDetach(msg)
 	case "queue":
 		b.cmdQueue(msg)
 	case "model":
@@ -61,6 +63,7 @@ func (b *Bot) cmdHelp(msg *telego.Message) {
 /sessions — список сессий и переключение между ними
 /rename <i>[название]</i> — переименовать текущую сессию
 /abort — прервать текущий запрос
+/detach — оставить текущую сессию работать в фоне
 /queue — показать ожидающие сообщения
 /model <i>[provider/model]</i> — показать или задать модель
 /agent <i>[name]</i> — показать или задать агента (build, plan, general, explore)
@@ -186,6 +189,60 @@ func (b *Bot) cmdAbort(msg *telego.Message) {
 		text += fmt.Sprintf(" Очередь очищена: %d.", cleared)
 	}
 	b.send(msg.Chat.ID, text)
+}
+
+// cmdDetach прекращает только отображение текущего запроса. Сам запрос уже
+// принят backend и продолжает работать; его завершение придёт уведомлением.
+func (b *Bot) cmdDetach(msg *telego.Message) {
+	b.mu.Lock()
+	st := b.stream
+	sessionID := b.sessionID
+	busy := b.busy
+	b.mu.Unlock()
+	if !busy || st == nil || sessionID == "" {
+		b.send(msg.Chat.ID, "Нет выполняющейся сессии, которую можно оставить в фоне.")
+		return
+	}
+
+	title := sessionID
+	if sess, err := b.backend.GetSession(context.Background(), sessionID); err == nil && strings.TrimSpace(sess.Title) != "" {
+		title = sess.Title
+	}
+
+	detached := false
+	st.finalizeOnce.Do(func() {
+		detached = true
+		// Оставляем то же сообщение в роли живого индикатора фоновой работы.
+		// Карта допускает несколько таких сессий одновременно.
+		b.mu.Lock()
+		b.background[sessionID] = &backgroundStream{
+			chatID: st.chatID, messageID: st.messageID, title: title,
+		}
+		b.mu.Unlock()
+		if st.done != nil {
+			close(st.done)
+		}
+		if st.stopped != nil {
+			<-st.stopped
+		}
+		b.endStream()
+		b.releaseRequest(false)
+		b.clearQueuedText()
+		b.mu.Lock()
+		b.sessionID = ""
+		b.userMsgID = ""
+		b.pendingQ = nil
+		b.perms = make(map[string]*permAsk)
+		b.mu.Unlock()
+		b.editMessageHTML(context.Background(), st.chatID, st.messageID,
+			"📎 Сессия <b>"+escapeHTML(title)+"</b> продолжает работу в фоне.")
+	})
+	if !detached {
+		b.send(msg.Chat.ID, "Запрос уже завершился; открой /sessions для выбора сессии.")
+		return
+	}
+	b.sendHTML(msg.Chat.ID, "📎 Открепил сессию <b>"+escapeHTML(title)+"</b>. "+
+		"Открой /sessions, чтобы выбрать другую; о завершении фоновой задачи сообщу отдельно.", nil)
 }
 
 // cmdQueue показывает снимок ожидающих текстовых запросов в порядке их запуска.

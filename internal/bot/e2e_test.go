@@ -549,6 +549,41 @@ func TestE2EBusyQueuesSecondRequest(t *testing.T) {
 	})
 }
 
+func TestE2EDetachKeepsBackendRequestAndNotifiesOnCompletion(t *testing.T) {
+	ft := newFakeTelegram(t)
+	fb := newFakeBackend(t)
+	fb.sessions = []backend.Session{{ID: testSessID, Title: "Исправить очередь", Directory: "/workspace", CreatedAt: time.Now()}}
+	fb.stored["asm1"] = `{"id":"asm1","role":"assistant","status":"completed","parts":[{"type":"text","text":"Готово"}]}`
+	b := newTestBot(t, ft, fb)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go b.eventLoop(ctx)
+	select {
+	case <-fb.wsReady:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ws-подписка не поднялась")
+	}
+
+	b.handleUpdate(textUpdate("запусти фоновую задачу"))
+	waitFor(t, func() bool { return fb.receivedMessages() == 1 })
+	b.handleUpdate(textUpdate("/detach"))
+	ft.waitText(t, "Открепил сессию")
+	b.mu.Lock()
+	busy, sessionID := b.busy, b.sessionID
+	b.mu.Unlock()
+	if busy || sessionID != "" {
+		t.Fatalf("detach оставил frontend занятым: busy=%v session=%q", busy, sessionID)
+	}
+
+	// После detach индикатор получает живую часть ответа, не занимая frontend.
+	fb.push(t, "message.part.updated", `{"part":{"id":"p-bg","messageID":"asm1","sessionID":"sess1","type":"text","text":"","tool":"","state":null},"delta":"Фоновый прогресс"}`)
+	ft.waitText(t, "Фоновый прогресс")
+	fb.push(t, "message.updated", evFinal)
+	ft.waitText(t, "Фоновая сессия")
+	ft.waitText(t, "Готово")
+}
+
 // TestE2EErrorFinal — финальный message.updated c ошибкой показывает ❌.
 func TestE2EErrorFinal(t *testing.T) {
 	ft := newFakeTelegram(t)
