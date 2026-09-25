@@ -489,8 +489,9 @@ func TestE2ETextMessage(t *testing.T) {
 	}
 }
 
-// TestE2EBusyRejectsSecondRequest — пока запрос в полёте, новый отклоняется.
-func TestE2EBusyRejectsSecondRequest(t *testing.T) {
+// TestE2EBusyQueuesSecondRequest — пока запрос в полёте, второй текст
+// ставится в очередь и отправляется только после финализации первого.
+func TestE2EBusyQueuesSecondRequest(t *testing.T) {
 	ft := newFakeTelegram(t)
 	fb := newFakeBackend(t)
 	fb.stored["asm1"] = `{"id":"asm1","role":"assistant","status":"completed","parts":[{"type":"text","text":"Привет!"}]}`
@@ -510,12 +511,33 @@ func TestE2EBusyRejectsSecondRequest(t *testing.T) {
 	waitFor(t, func() bool { return fb.receivedMessages() == 1 })
 
 	b.handleUpdate(textUpdate("second"))
-	ft.waitText(t, "⏳ Подожди")
+	ft.waitText(t, "📥 Добавил сообщение в очередь: 1/5")
+	if got := fb.receivedMessages(); got != 1 {
+		t.Fatalf("запрос из очереди слишком рано дошёл до backend: %d запросов", got)
+	}
+	b.handleUpdate(textUpdate("/queue"))
+	ft.waitText(t, "<b>Очередь сообщений</b> · 1/5\n\n1. <blockquote>second</blockquote>")
 
-	// завершаем первый запрос, чтобы бот вернулся в не-busy состояние
+	// Завершаем первый запрос: после его финального ответа должен уйти второй.
 	fb.push(t, "message.updated", evUserEcho)
 	fb.push(t, "message.updated", evFinal)
 	ft.waitText(t, "Привет!")
+	waitFor(t, func() bool { return fb.receivedMessages() == 2 })
+	fb.mu.Lock()
+	second := fb.gotMsg[1]
+	fb.mu.Unlock()
+	if len(second.Parts) != 1 || second.Parts[0].Type != "text" || second.Parts[0].Text != "second" {
+		t.Fatalf("второй запрос в backend = %+v, ожидался текст из очереди", second)
+	}
+
+	// Не оставляем в тесте незавершённый второй запрос.
+	fb.push(t, "message.updated", evUserEcho)
+	fb.push(t, "message.updated", evFinal)
+	waitFor(t, func() bool {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		return !b.busy
+	})
 }
 
 // TestE2EErrorFinal — финальный message.updated c ошибкой показывает ❌.

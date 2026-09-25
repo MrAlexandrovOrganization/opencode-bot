@@ -78,9 +78,13 @@ func (b *Bot) newMessageRequest() backend.MessageRequest {
 // handleText processes a plain text message: sends it to the backend and
 // streams the response back into the placeholder.
 func (b *Bot) handleText(msg *telego.Message) {
-	ctx, ok := b.beginRequest()
-	if !ok {
-		b.send(msg.Chat.ID, "⏳ Подожди, я ещё думаю...")
+	ctx, start, position, full := b.beginTextRequest(msg.Chat.ID, msg.Text)
+	if !start {
+		if full {
+			b.send(msg.Chat.ID, fmt.Sprintf("⌛ Очередь заполнена (%d сообщений). Дождись завершения текущих задач.", maxQueuedTextMessages))
+			return
+		}
+		b.send(msg.Chat.ID, fmt.Sprintf("📥 Добавил сообщение в очередь: %d/%d.", position, maxQueuedTextMessages))
 		return
 	}
 	req := b.newMessageRequest()

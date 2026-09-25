@@ -30,6 +30,8 @@ func (b *Bot) handleCommand(cmd string, msg *telego.Message) {
 		b.cmdRename(msg)
 	case "abort":
 		b.cmdAbort(msg)
+	case "queue":
+		b.cmdQueue(msg)
 	case "model":
 		b.cmdModel(msg)
 	case "agent":
@@ -59,12 +61,16 @@ func (b *Bot) cmdHelp(msg *telego.Message) {
 /sessions — список сессий и переключение между ними
 /rename <i>[название]</i> — переименовать текущую сессию
 /abort — прервать текущий запрос
+/queue — показать ожидающие сообщения
 /model <i>[provider/model]</i> — показать или задать модель
 /agent <i>[name]</i> — показать или задать агента (build, plan, general, explore)
 
 <b>Сообщения</b>
 
 📝 <b>Текст</b> — отправляется агенту, ответ стримится в сообщение
+Если агент занят, до 5 обычных текстовых сообщений ставятся в очередь и
+выполняются по порядку. Посмотреть их можно командой /queue; /abort и
+успешный /reset очищают очередь.
 🖼 <b>Фото / документ</b> — прикрепляется как вложение, подпись — вопрос
 🎬 <b>Видео / стикер / GIF / аудио</b> — прикрепляется как файл,
 подпись — вопрос
@@ -90,7 +96,6 @@ func (b *Bot) cmdReset(msg *telego.Message) {
 		b.send(msg.Chat.ID, "⏳ Дождись завершения текущего запроса, затем /reset.")
 		return
 	}
-
 	ctx := context.Background()
 	old := b.currentSessionID()
 	if old != "" {
@@ -98,6 +103,7 @@ func (b *Bot) cmdReset(msg *telego.Message) {
 		// не плодим новую пустую — оставляем текущую.
 		empty, err := b.backend.IsSessionEmpty(ctx, old)
 		if err == nil && empty {
+			b.clearQueuedText()
 			b.sendHTML(msg.Chat.ID,
 				fmt.Sprintf("Сессия <code>%s</code> пустая — новая не создана.", escapeHTML(old)), nil)
 			return
@@ -115,6 +121,7 @@ func (b *Bot) cmdReset(msg *telego.Message) {
 	if old != "" && old != id {
 		_ = b.backend.DeleteSession(ctx, old)
 	}
+	b.clearQueuedText()
 	b.sendHTML(msg.Chat.ID, fmt.Sprintf("Новая сессия создана: <code>%s</code>", escapeHTML(id)), nil)
 }
 
@@ -157,16 +164,44 @@ func (b *Bot) cmdSession(msg *telego.Message) {
 }
 
 func (b *Bot) cmdAbort(msg *telego.Message) {
+	cleared := b.clearQueuedText()
 	id := b.currentSessionID()
 	if id == "" {
+		if cleared > 0 {
+			b.send(msg.Chat.ID, "Очередь сообщений очищена.")
+		}
 		b.send(msg.Chat.ID, "Нет активной сессии.")
 		return
 	}
 	if err := b.backend.AbortSession(context.Background(), id); err != nil {
-		b.send(msg.Chat.ID, "Не удалось прервать: "+err.Error())
+		text := "Не удалось прервать: " + err.Error()
+		if cleared > 0 {
+			text += fmt.Sprintf(" Очередь очищена: %d.", cleared)
+		}
+		b.send(msg.Chat.ID, text)
 		return
 	}
-	b.send(msg.Chat.ID, "⏹ Запрос прерван.")
+	text := "⏹ Запрос прерван."
+	if cleared > 0 {
+		text += fmt.Sprintf(" Очередь очищена: %d.", cleared)
+	}
+	b.send(msg.Chat.ID, text)
+}
+
+// cmdQueue показывает снимок ожидающих текстовых запросов в порядке их запуска.
+func (b *Bot) cmdQueue(msg *telego.Message) {
+	items := b.queuedTextSnapshot()
+	if len(items) == 0 {
+		b.send(msg.Chat.ID, "Очередь пуста.")
+		return
+	}
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "<b>Очередь сообщений</b> · %d/%d\n", len(items), maxQueuedTextMessages)
+	for i, item := range items {
+		fmt.Fprintf(&sb, "\n%d. <blockquote>%s</blockquote>", i+1, escapeHTML(shortLine(strings.Join(strings.Fields(item.text), " "), 240)))
+	}
+	b.sendHTML(msg.Chat.ID, sb.String(), nil)
 }
 
 func (b *Bot) cmdModel(msg *telego.Message) {

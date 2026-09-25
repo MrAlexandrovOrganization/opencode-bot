@@ -22,6 +22,11 @@ import (
 // maxMessageLen is the safe Telegram message length (actual limit is 4096).
 const maxMessageLen = 4000
 
+// maxQueuedTextMessages ограничивает очередь обычных текстовых запросов в памяти.
+// Вложения и голосовые в неё намеренно не попадают: повтор проиграл бы скачивание
+// или транскрибацию спустя непредсказуемое время.
+const maxQueuedTextMessages = 5
+
 // stallTimeout — если от шлюза нет событий дольше этого времени и финальное
 // message.updated так и не пришло, превью принудительно завершается, чтобы
 // сообщение с курсором не висело в чате вечно (иллюзия зависания). Значение
@@ -48,6 +53,7 @@ type Bot struct {
 	userMsgID string              // messageID user-эха текущего запроса (части игнорируются)
 	perms     map[string]*permAsk // permissionID -> pending "ask" prompt
 	pendingQ  *pendingQuestions   // question the agent is awaiting an answer to
+	queued    []queuedText        // текстовые запросы, пришедшие во время выполнения
 
 	// activeJob — активная транскрибация Whisper, чтобы пользователь мог
 	// отменить её кнопкой «Отменить» (как в transcriber-bot). Единственная,
@@ -61,6 +67,11 @@ type Bot struct {
 	// дедлайна, удерживая busy-флаг.
 	reqCtx    context.Context
 	reqCancel context.CancelFunc
+}
+
+type queuedText struct {
+	chatID int64
+	text   string
 }
 
 // Stream tracks the in-flight assistant message so the WebSocket bus can
@@ -194,30 +205,73 @@ func (b *Bot) newSession(ctx context.Context) (string, error) {
 
 // ── Concurrency ──────────────────────────────────────────────────────────────
 
-func (b *Bot) tryAcquire() bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.busy {
-		return false
-	}
-	b.busy = true
-	return true
-}
-
 // beginRequest захватывает busy-флаг и создаёт отменяемый контекст запроса,
 // который будет отменён в release() (при финализации стрима или ошибке).
 // Возвращает ok=false, если бот уже занят. Полученный ctx следует
 // передавать во внешние вызовы (backend, Whisper, скачивание файлов), чтобы
 // их можно было прервать при /abort, таймауте или завершении запроса.
 func (b *Bot) beginRequest() (context.Context, bool) {
-	if !b.tryAcquire() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	// Файл или голосовое не должны обгонять уже принятые текстовые запросы.
+	if b.busy || len(b.queued) > 0 {
 		return nil, false
 	}
+	b.busy = true
 	ctx, cancel := context.WithCancel(context.Background())
-	b.mu.Lock()
 	b.reqCtx, b.reqCancel = ctx, cancel
-	b.mu.Unlock()
 	return ctx, true
+}
+
+// beginTextRequest либо сразу резервирует запрос, либо добавляет текст в FIFO-
+// очередь. Решение атомарно с busy, поэтому новое сообщение не обгонит уже
+// поставленное в очередь.
+func (b *Bot) beginTextRequest(chatID int64, text string) (ctx context.Context, start bool, position int, full bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.busy || len(b.queued) > 0 {
+		if len(b.queued) >= maxQueuedTextMessages {
+			return nil, false, 0, true
+		}
+		b.queued = append(b.queued, queuedText{chatID: chatID, text: text})
+		return nil, false, len(b.queued), false
+	}
+	b.busy = true
+	ctx, cancel := context.WithCancel(context.Background())
+	b.reqCtx, b.reqCancel = ctx, cancel
+	return ctx, true, 0, false
+}
+
+// takeQueuedTextRequest резервирует самый ранний текст из очереди. Вынесен из
+// dispatchNextQueued, чтобы FIFO и блокировки проверялись без Telegram и backend I/O.
+func (b *Bot) takeQueuedTextRequest() (context.Context, queuedText, int, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.busy || len(b.queued) == 0 {
+		return nil, queuedText{}, 0, false
+	}
+	item := b.queued[0]
+	b.queued = b.queued[1:]
+	b.busy = true
+	ctx, cancel := context.WithCancel(context.Background())
+	b.reqCtx, b.reqCancel = ctx, cancel
+	return ctx, item, len(b.queued), true
+}
+
+func (b *Bot) clearQueuedText() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	n := len(b.queued)
+	b.queued = nil
+	return n
+}
+
+// queuedTextSnapshot возвращает копию очереди для отображения без удержания
+// блокировки на время работы Telegram API.
+func (b *Bot) queuedTextSnapshot() []queuedText {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]queuedText(nil), b.queued...)
 }
 
 // requestContext возвращает контекст текущего запроса (или Background).
@@ -231,6 +285,13 @@ func (b *Bot) requestContext() context.Context {
 }
 
 func (b *Bot) release() {
+	b.releaseRequest(true)
+}
+
+// releaseRequest освобождает активный запрос. finishStream передаёт dispatch=false
+// до отправки финального ответа в Telegram, чтобы следующий placeholder не
+// обгонял предыдущий ответ в чате.
+func (b *Bot) releaseRequest(dispatch bool) {
 	b.mu.Lock()
 	b.busy = false
 	if b.reqCancel != nil {
@@ -239,6 +300,9 @@ func (b *Bot) release() {
 		b.reqCtx = nil
 	}
 	b.mu.Unlock()
+	if dispatch {
+		go b.dispatchNextQueued()
+	}
 }
 
 func (b *Bot) beginStream(chatID int64, messageID int) {
@@ -554,9 +618,11 @@ func (b *Bot) finishStream(st *Stream, info backend.Message, errText string) {
 		b.finishCommon(st)
 		if errText != "" {
 			b.editMessage(context.Background(), st.chatID, st.messageID, truncate(errText))
+			b.dispatchNextQueued()
 			return
 		}
 		b.sendFinalResponse(context.Background(), st.chatID, st.messageID, text, info, toolLog, reasoning)
+		b.dispatchNextQueued()
 	})
 }
 
@@ -579,9 +645,11 @@ func (b *Bot) finishStalled(st *Stream, text string, info backend.Message, errTe
 		b.finishCommon(st)
 		if errText != "" {
 			b.editMessage(context.Background(), st.chatID, st.messageID, truncate(errText))
+			b.dispatchNextQueued()
 			return
 		}
 		b.sendFinalResponse(context.Background(), st.chatID, st.messageID, text, info, toolLog, reasoning)
+		b.dispatchNextQueued()
 	})
 }
 
@@ -595,7 +663,7 @@ func (b *Bot) finishCommon(st *Stream) {
 		<-st.stopped
 	}
 	b.endStream()
-	b.release()
+	b.releaseRequest(false)
 	// Запрос завершён (в т.ч. по таймауту/ошибке): любые висящие вопрос
 	// и запросы разрешений устарели, чтобы не съедать следующее
 	// сообщение пользователя как «ответ» на мёртвый вопрос.
@@ -603,6 +671,20 @@ func (b *Bot) finishCommon(st *Stream) {
 	b.pendingQ = nil
 	b.perms = make(map[string]*permAsk)
 	b.mu.Unlock()
+}
+
+// dispatchNextQueued запускает один текстовый запрос из очереди после полной
+// отрисовки предыдущего ответа. Следующий стартует его финализацией, поэтому
+// два запроса к OpenCode не пересекаются.
+func (b *Bot) dispatchNextQueued() {
+	ctx, item, left, ok := b.takeQueuedTextRequest()
+	if !ok {
+		return
+	}
+	b.send(item.chatID, fmt.Sprintf("📤 Выполняю сообщение из очереди (осталось: %d).", left))
+	req := b.newMessageRequest()
+	req.AddText(item.text)
+	b.startRequest(ctx, item.chatID, req)
 }
 
 // previewLoop keeps the placeholder up to date with the stream state.
