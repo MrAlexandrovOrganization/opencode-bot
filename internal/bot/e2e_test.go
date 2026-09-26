@@ -548,6 +548,48 @@ func TestE2EOpenCodeSlashCommand(t *testing.T) {
 	ft.waitText(t, "Контекст сжат")
 }
 
+// TestParseCommand — регресс на разбор команды с аргументами. Раньше здесь
+// использовался tu.ParseCommand, который на go1.26.6 для этого пакета
+// возвращал пустую строку вместо аргументов: /compact, /model и /agent
+// молча теряли всё, что идёт после имени команды.
+func TestParseCommand(t *testing.T) {
+	cases := []struct {
+		text string
+		cmd  string
+		args string
+	}{
+		{"/compact", "compact", ""},
+		{"/compact keep latest", "compact", "keep latest"},
+		{"/model anthropic/claude-sonnet-4", "model", "anthropic/claude-sonnet-4"},
+		{"/rename мой титул", "rename", "мой титул"},
+		{"/agent@opencode_bot plan", "agent", "plan"},
+		{"/help   ", "help", ""},
+		{"просто текст", "", ""},
+		{"", "", ""},
+	}
+	for _, tc := range cases {
+		cmd, args := parseCommand(tc.text)
+		if cmd != tc.cmd || args != tc.args {
+			t.Errorf("parseCommand(%q) = (%q, %q), ожидалось (%q, %q)",
+				tc.text, cmd, args, tc.cmd, tc.args)
+		}
+	}
+}
+
+// TestE2EModelCommandArgs — /model с аргументом обязан менять модель, а не
+// показывать текущую (регресс на потерю аргументов команды).
+func TestE2EModelCommandArgs(t *testing.T) {
+	ft := newFakeTelegram(t)
+	fb := newFakeBackend(t)
+	b := newTestBot(t, ft, fb)
+
+	b.handleUpdate(textUpdate("/model anthropic/claude-sonnet-4"))
+	ft.waitText(t, "Модель: <code>anthropic/claude-sonnet-4</code>")
+	if fb.receivedMessages() != 0 {
+		t.Fatalf("команда не должна уходить в opencode: сообщений %d", fb.receivedMessages())
+	}
+}
+
 // TestE2EBusyQueuesSecondRequest — пока запрос в полёте, второй текст
 // ставится в очередь и отправляется только после финализации первого.
 func TestE2EBusyQueuesSecondRequest(t *testing.T) {

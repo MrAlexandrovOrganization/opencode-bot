@@ -10,7 +10,6 @@ import (
 	"opencode-bot/internal/backend"
 
 	"github.com/mymmrac/telego"
-	tu "github.com/mymmrac/telego/telegoutil"
 )
 
 // handleCommand dispatches bot commands.
@@ -139,13 +138,13 @@ func (b *Bot) cmdOpenCodeCommands(msg *telego.Message) {
 // Это поддерживает команды из opencode.json без их дублирования в коде
 // Telegram-бота.
 func (b *Bot) cmdOpenCodeCommand(command string, msg *telego.Message) {
-	_, arguments, _ := tu.ParseCommand(msg.Text)
+	_, arguments := parseCommand(msg.Text)
 	ctx, ok := b.beginRequest()
 	if !ok {
 		b.send(msg.Chat.ID, "⏳ Сессия занята. Дождись ответа или используй /detach.")
 		return
 	}
-	go b.startCommandRequest(ctx, msg.Chat.ID, command, strings.TrimSpace(arguments))
+	go b.startCommandRequest(ctx, msg.Chat.ID, command, arguments)
 }
 
 func (b *Bot) cmdReset(msg *telego.Message) {
@@ -321,8 +320,7 @@ func (b *Bot) cmdQueue(msg *telego.Message) {
 }
 
 func (b *Bot) cmdModel(msg *telego.Message) {
-	_, args, _ := tu.ParseCommand(msg.Text)
-	args = strings.TrimSpace(args)
+	_, args := parseCommand(msg.Text)
 
 	if args == "" {
 		b.mu.Lock()
@@ -349,8 +347,7 @@ func (b *Bot) cmdModel(msg *telego.Message) {
 }
 
 func (b *Bot) cmdAgent(msg *telego.Message) {
-	_, args, _ := tu.ParseCommand(msg.Text)
-	args = strings.TrimSpace(args)
+	_, args := parseCommand(msg.Text)
 
 	if args == "" {
 		b.mu.Lock()

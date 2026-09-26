@@ -3,6 +3,7 @@ package bot
 import (
 	"context"
 	"log/slog"
+	"strings"
 
 	"go.opentelemetry.io/otel"
 
@@ -12,6 +13,16 @@ import (
 
 func (b *Bot) handleUpdate(update telego.Update) {
 	b.handleUpdateContext(context.Background(), update)
+}
+
+// parseCommand разбирает текст апдейта на команду и её аргументы.
+// tu.ParseCommand здесь не используется намеренно: на go1.26.6 его третий
+// результат (args []string в исходнике telego) для этого пакета читается
+// компилятором как string и приходит пустым — аргументы команды теряются.
+// ParseCommandPayload отдаёт payload строкой и работает корректно.
+func parseCommand(text string) (cmd, args string) {
+	cmd, _, args = tu.ParseCommandPayload(text)
+	return cmd, strings.TrimSpace(args)
 }
 
 func (b *Bot) handleUpdateContext(parent context.Context, update telego.Update) {
@@ -67,7 +78,7 @@ func (b *Bot) handleUpdateContext(parent context.Context, update telego.Update) 
 	case msg.Sticker != nil:
 		b.handleSticker(msg)
 	case msg.Text != "":
-		cmd, _, _ := tu.ParseCommand(msg.Text)
+		cmd, _ := parseCommand(msg.Text)
 		if cmd != "" {
 			b.handleCommand(cmd, msg)
 		} else if b.answerQuestionText(msg) {
