@@ -65,10 +65,11 @@ func TestToolStatus(t *testing.T) {
 	}
 }
 
-// TestRenderPreview — живое превью и foreground-стрима, и фонового окна:
+// TestRenderPreviewHTML — живое превью и foreground-стрима, и фонового окна:
 // последние завершённые тулы, затем текущая активность в приоритете
-// статус тул-вызова > черновик ответа > reasoning.
-func TestRenderPreview(t *testing.T) {
+// статус тул-вызова > черновик ответа > reasoning. Журнал и статус отдаются
+// обычным текстом, черновик и reasoning — markdown.
+func TestRenderPreviewHTML(t *testing.T) {
 	log := []string{"✓ read: a.go", "✗ bash: make test — exit 1"}
 
 	tests := []struct {
@@ -106,12 +107,22 @@ func TestRenderPreview(t *testing.T) {
 			log:  []string{"1", "2", "3", "4", "5", "6", "7", "8"},
 			want: "3\n4\n5\n6\n7\n8\n",
 		},
+		{
+			name:    "partial is rendered as markdown",
+			partial: "## Итог\n\n**готово** и `код`",
+			want:    "<b>Итог</b>\n\n<b>готово</b> и <code>код</code>",
+		},
+		{
+			name: "tool line is escaped, not markdown",
+			log:  []string{"✓ glob: *.go *.md"},
+			want: "✓ glob: *.go *.md\n",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := renderPreview(tt.log, tt.status, tt.partial, tt.reasoning); got != tt.want {
-				t.Errorf("renderPreview() = %q, want %q", got, tt.want)
+			if got := renderPreviewHTML(tt.log, tt.status, tt.partial, tt.reasoning); got != tt.want {
+				t.Errorf("renderPreviewHTML() = %q, want %q", got, tt.want)
 			}
 		})
 	}

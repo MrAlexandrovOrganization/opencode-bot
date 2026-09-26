@@ -23,6 +23,10 @@ import (
 // maxMessageLen is the safe Telegram message length (actual limit is 4096).
 const maxMessageLen = 4000
 
+// previewBodyLen — бюджет тела живого превью: лимит сообщения минус метка
+// «💭 выполняется…» и запас на теги, которые добавляет обрезка HTML.
+const previewBodyLen = maxMessageLen - 128
+
 // maxQueuedTextMessages ограничивает очередь обычных текстовых запросов в памяти.
 // Вложения и голосовые в неё намеренно не попадают: повтор проиграл бы скачивание
 // или транскрибацию спустя непредсказуемое время.
@@ -609,7 +613,7 @@ func (b *Bot) updateBackgroundStream(sessionID, partMessageID, partType, text, t
 	}
 	st.lastSent = time.Now()
 	chatID, messageID, title := st.chatID, st.messageID, st.title
-	preview := renderPreview(st.log, st.status, st.partial, st.reasoning)
+	preview := renderPreviewHTML(st.log, st.status, st.partial, st.reasoning)
 	st.mu.Unlock()
 	b.editMessageHTML(context.Background(), chatID, messageID, backgroundProgressHTML(title, preview))
 }
@@ -665,21 +669,22 @@ func (b *Bot) finishBackgroundStream(sessionID, topLevelSessionID string, info b
 }
 
 // backgroundProgressHTML рендерит живое состояние фонового окна: заголовок
-// сессии и тот же превью-текст, что и у foreground-стрима (последние тулы,
-// текущий статус / черновик ответа / reasoning).
+// сессии и то же HTML-превью, что и у foreground-стрима (последние тулы,
+// текущий статус / черновик ответа / reasoning). preview — уже готовый HTML,
+// поэтому он только обрезается по длине, без повторного экранирования.
 func backgroundProgressHTML(title, preview string) string {
 	text := strings.TrimSpace(preview)
 	if text == "" {
-		text = "💭 Выполняется…"
+		return "📎 Фоновая сессия " + htmlBold(title) + "\n💭 Выполняется…"
 	}
-	return "📎 Фоновая сессия " + htmlBold(title) + "\n" + escapeHTML(shortLine(text, 1500))
+	return "📎 Фоновая сессия " + htmlBold(title) + "\n" + truncateHTML(text, 1500)
 }
 
-// backgroundPreview возвращает текущий превью-текст фонового окна.
+// backgroundPreview возвращает текущее HTML-превью фонового окна.
 func backgroundPreview(bg *backgroundStream) string {
 	bg.mu.Lock()
 	defer bg.mu.Unlock()
-	return renderPreview(bg.log, bg.status, bg.partial, bg.reasoning)
+	return renderPreviewHTML(bg.log, bg.status, bg.partial, bg.reasoning)
 }
 
 // backgroundFromStream строит фоновое окно из текущего стрима, сохраняя весь
@@ -1027,13 +1032,14 @@ func (b *Bot) previewLoop(st *Stream, chatID int64) {
 				ChatID: telego.ChatID{ID: chatID},
 				Action: "typing",
 			})
-			curr := b.previewText()
+			curr := b.previewHTML()
 			if curr != last && curr != "" {
 				// Явная метка «черновик», без двусмысленного курсора ▌.
-				// Метка и динамический текст уходят в HTML-режиме, поэтому
-				// live-контент экранируем, чтобы `<i>` не печатался как есть.
+				// Тело превью уже свёрстано как HTML: журнал тулов —
+				// обычный текст, черновик ответа и reasoning — markdown,
+				// как в финальном ответе.
 				b.editMessageHTML(context.Background(), chatID, st.messageID,
-					"💭 <i>выполняется…</i>\n\n"+escapeHTML(truncate(curr)))
+					"💭 <i>выполняется…</i>\n\n"+curr)
 				last = curr
 			}
 			// Страховка: шлюз давно не отвечал и финал не пришёл. Сначала
@@ -1149,41 +1155,46 @@ func (b *Bot) finalText(st *Stream, info backend.Message) string {
 	return b.partialText()
 }
 
-// previewText returns what should be shown in the live placeholder right now:
-// recent tool activity, then either the current tool / reasoning, or text.
-func (b *Bot) previewText() string {
+// previewHTML возвращает HTML превью текущего стрима: последние завершённые
+// тулы, затем текущую активность (статус тул-вызова / черновик ответа /
+// reasoning).
+func (b *Bot) previewHTML() string {
 	st := b.currentStream()
 	if st == nil {
 		return ""
 	}
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	return renderPreview(st.log, st.status, st.partial, st.reasoning)
+	return renderPreviewHTML(st.log, st.status, st.partial, st.reasoning)
 }
 
-// renderPreview собирает живой превью-текст: последние завершённые тулы, затем
-// текущую активность (статус тул-вызова / черновик ответа / reasoning).
-// Один рендер для foreground-стрима и фоновых окон, чтобы они выглядели одинаково.
-func renderPreview(log []string, status, partial, reasoning string) string {
+// renderPreviewHTML собирает живое превью в HTML тем же способом, что и
+// финальный ответ: журнал тулов и статус тул-вызова — обычный экранированный
+// текст (в них бывают globs, кавычки и пути, которые markdown исказил бы),
+// черновик ответа и reasoning — markdown. Один рендер для foreground-стрима и
+// фоновых окон, чтобы они выглядели одинаково.
+func renderPreviewHTML(log []string, status, partial, reasoning string) string {
 	var sb strings.Builder
 	start := 0
 	if n := len(log); n > 6 {
 		start = n - 6
 	}
 	for _, l := range log[start:] {
-		sb.WriteString(l)
+		sb.WriteString(escapeHTML(l))
 		sb.WriteByte('\n')
 	}
 	switch {
 	case status != "":
-		sb.WriteString(status)
+		sb.WriteString(escapeHTML(status))
 	case partial != "":
-		sb.WriteString(partial)
+		sb.WriteString(markdownToHTML(truncate(partial)))
 	case reasoning != "":
-		sb.WriteString("🧠 ")
-		sb.WriteString(shortLine(reasoning, 200))
+		sb.WriteString("🧠 " + markdownToHTML(shortLine(reasoning, 200)))
 	}
-	return sb.String()
+	// Обрезаем тело по бюджету, не разрывая теги: иначе длинный черновик
+	// вместе с меткой «💭 выполняется…» перевалит за лимит Telegram и
+	// editMessageText будет отклонён целиком (превью замрёт).
+	return truncateHTML(sb.String(), previewBodyLen)
 }
 
 // toolLog returns a copy of the finished tool-call lines for the request.
@@ -1317,56 +1328,34 @@ func buildFinalChunks(text string, info backend.Message, toolLog, reasoning []st
 	return chunks
 }
 
-// splitActivityChunks packs the tool log and reasoning lines into self
-// contained <i>…</i> HTML chunks, splitting only at line boundaries. An
-// over-long line is split by runes into several <i>…</i> pieces.
+// splitActivityChunks собирает журнал тулов и рассуждения в самодостаточные
+// HTML-сообщения, которые идут перед финальным ответом. Строки журнала —
+// обычный текст (в них бывают globs, пути и кавычки, которые markdown
+// исказил бы), рассуждения — markdown, как в самом ответе. Курсивом ничего
+// не оборачивается: раньше каждая строка попадала внутрь <i>, и всё
+// сопроводительное сообщение читалось как сплошной курсив с сырым markdown.
+// Заголовок отделяет ход работы от финального ответа, который приходит
+// отдельным сообщением.
 func splitActivityChunks(toolLog, reasoning []string) []string {
-	lines := make([]string, 0, len(toolLog)+len(reasoning))
-	for _, l := range toolLog {
-		lines = append(lines, l)
+	if len(toolLog) == 0 && len(reasoning) == 0 {
+		return nil
+	}
+	blocks := make([]string, 0, len(toolLog)+len(reasoning)+1)
+	blocks = append(blocks, "📋 <b>Ход работы</b>")
+	for _, line := range toolLog {
+		blocks = append(blocks, escapeHTML(line))
 	}
 	for _, r := range reasoning {
-		lines = append(lines, "🧠 "+r)
+		blocks = append(blocks, "🧠 "+markdownToHTML(r))
 	}
-
-	var chunks []string
-	var sb strings.Builder
-	flush := func() {
-		if sb.Len() > 0 {
-			chunks = append(chunks, sb.String())
-			sb.Reset()
-		}
-	}
-	add := func(html string) {
-		if sb.Len() > 0 && len([]rune(sb.String()))+len([]rune(html))+1 > maxMessageLen {
-			flush()
-		}
-		if sb.Len() > 0 {
-			sb.WriteByte('\n')
-		}
-		sb.WriteString(html)
-	}
-
-	for _, line := range lines {
-		wrapped := htmlItalic(line)
-		if len([]rune(wrapped)) > maxMessageLen {
-			for _, piece := range splitRunes(line, maxMessageLen-7) {
-				add(htmlItalic(piece))
-			}
-			continue
-		}
-		add(wrapped)
-	}
-	flush()
-	return chunks
+	return packHTMLBlocks(blocks)
 }
 
-// splitMarkdownChunks splits a markdown document into HTML chunks. It first
-// breaks the text into block-level pieces (paragraphs, code fences,
-// blockquotes, list runs) that each render to well-formed HTML, then packs
-// them greedily into maxMessageLen-sized chunks. A block that is too big on
-// its own is split: code fences by inner lines, everything else by runes.
-func splitMarkdownChunks(text string) []string {
+// packHTMLBlocks собирает готовые HTML-блоки в сообщения не длиннее
+// maxMessageLen. Разрез идёт только по границам блоков, поэтому теги в
+// каждом куске остаются сбалансированными; слишком длинный блок заранее
+// разбивается через splitHTMLChunks.
+func packHTMLBlocks(blocks []string) []string {
 	var chunks []string
 	var buf strings.Builder
 	bufLen := 0
@@ -1380,29 +1369,44 @@ func splitMarkdownChunks(text string) []string {
 	add := func(html string) {
 		for _, piece := range splitHTMLChunks(html, maxMessageLen) {
 			n := len([]rune(piece))
-			if bufLen > 0 && bufLen+n > maxMessageLen {
+			if bufLen > 0 && bufLen+n+1 > maxMessageLen {
 				flush()
 			}
 			if bufLen > 0 {
 				buf.WriteByte('\n')
+				bufLen++
 			}
 			buf.WriteString(piece)
 			bufLen += n
 		}
 	}
-
-	for _, block := range markdownBlocks(text) {
-		html := markdownToHTML(block)
-		if len([]rune(html)) <= maxMessageLen {
-			add(html)
-			continue
-		}
-		for _, piece := range splitOversizedBlock(block) {
-			add(markdownToHTML(piece))
+	for _, b := range blocks {
+		if b != "" {
+			add(b)
 		}
 	}
 	flush()
 	return chunks
+}
+
+// splitMarkdownChunks splits a markdown document into HTML chunks. It first
+// breaks the text into block-level pieces (paragraphs, code fences,
+// blockquotes, list runs) that each render to well-formed HTML, then packs
+// them greedily into maxMessageLen-sized chunks. A block that is too big on
+// its own is split: code fences by inner lines, everything else by runes.
+func splitMarkdownChunks(text string) []string {
+	var blocks []string
+	for _, block := range markdownBlocks(text) {
+		html := markdownToHTML(block)
+		if len([]rune(html)) <= maxMessageLen {
+			blocks = append(blocks, html)
+			continue
+		}
+		for _, piece := range splitOversizedBlock(block) {
+			blocks = append(blocks, markdownToHTML(piece))
+		}
+	}
+	return packHTMLBlocks(blocks)
 }
 
 // markdownBlocks breaks markdown into block-level pieces that each render to
@@ -1666,4 +1670,18 @@ func truncate(s string) string {
 		return s
 	}
 	return string(r[:maxMessageLen-3]) + "..."
+}
+
+// truncateHTML обрезает HTML до n рун, не разрывая теги: открытые теги
+// закрываются в конце куска, поэтому результат остаётся валидным для
+// parse_mode=HTML. Обычный truncate здесь непригоден — он мог разрезать тег
+// посередине, и Telegram отклонил бы сообщение целиком.
+func truncateHTML(s string, n int) string {
+	if len([]rune(s)) <= n {
+		return s
+	}
+	if pieces := splitHTMLChunks(s, n); len(pieces) > 0 {
+		return pieces[0]
+	}
+	return s
 }

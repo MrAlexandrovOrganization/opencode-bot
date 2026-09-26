@@ -86,9 +86,10 @@ func TestBuildFinalChunks(t *testing.T) {
 		joined += c + "\n"
 	}
 	for _, want := range []string{
-		"<i>✓ bash: npm test</i>",
-		"<i>✓ read: internal/bot/bot.go</i>",
-		"<i>🧠 Let me look at the files.</i>",
+		"📋 <b>Ход работы</b>",
+		"✓ bash: npm test",
+		"✓ read: internal/bot/bot.go",
+		"🧠 Let me look at the files.",
 		"<pre><code class=\"language-go\">ok</code></pre>",
 		"💸 $0.0123",
 		"⤴ 100",
@@ -101,6 +102,11 @@ func TestBuildFinalChunks(t *testing.T) {
 	// Activity first, answer after, footer last.
 	if !strings.Contains(chunks[0], "bash: npm test") {
 		t.Errorf("first chunk should hold the tool log, got %q", chunks[0])
+	}
+	// Сопроводительное сообщение не должно быть сплошным курсивом — раньше
+	// каждая его строка была обёрнута в <i>.
+	if strings.Contains(chunks[0], "<i>") {
+		t.Errorf("activity chunk must not be italic, got %q", chunks[0])
 	}
 	if !strings.Contains(chunks[len(chunks)-1], "💸") {
 		t.Errorf("last chunk should hold the footer, got %q", chunks[len(chunks)-1])

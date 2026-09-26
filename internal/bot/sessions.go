@@ -340,9 +340,9 @@ func (b *Bot) handleSessionSwitch(query *telego.CallbackQuery) {
 		// сразу после переключения.
 		go b.previewLoop(promoted, promoted.chatID)
 		go b.timeoutLoop(promoted)
-		if preview := b.previewText(); preview != "" {
+		if preview := b.previewHTML(); preview != "" {
 			b.editMessageHTML(context.Background(), promoted.chatID, promoted.messageID,
-				"💭 <i>выполняется…</i>\n\n"+escapeHTML(truncate(preview)))
+				"💭 <i>выполняется…</i>\n\n"+preview)
 		}
 	}
 }
