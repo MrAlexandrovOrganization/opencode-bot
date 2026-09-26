@@ -101,17 +101,23 @@ type Stream struct {
 }
 
 // backgroundStream — Telegram-сообщение, которое служит "окном" в
-// откреплённую сессию. В отличие от Stream, оно показывает только последнюю
-// активность: полный ответ доступен после выбора сессии в /sessions.
+// откреплённую сессию. Оно копит тот же контекст, что и foreground Stream
+// (журнал тулов, reasoning, черновик ответа), поэтому переключение обратно
+// через /sessions ничего не теряет: окно превращается в полноценный стрим.
 type backgroundStream struct {
 	chatID    int64
 	messageID int
 	title     string
+	started   time.Time // начало запроса — для stall-догонялки после attach
+	userMsgID string    // id user-эхо запроса: его части не показываем
 
-	mu       sync.Mutex
-	partial  string
-	status   string
-	lastSent time.Time
+	mu           sync.Mutex
+	partial      string   // streamed assistant text
+	reasoning    string   // reasoning of the current step
+	reasoningLog []string // reasoning of all completed steps
+	status       string   // transient "what the agent is doing now" line
+	log          []string // completed tool calls (✓/✗ lines)
+	lastSent     time.Time
 }
 
 // touch фиксирует активность шлюза, сбрасывая таймер зависания.
@@ -421,7 +427,7 @@ func (b *Bot) onMessagePartUpdated(ev backend.Event) {
 		return
 	}
 	if props.Part.SessionID != b.currentSessionID() {
-		b.updateBackgroundStream(props.Part.SessionID, props.Part.Type, props.Part.Text, props.Part.Tool, props.Part.State, props.Delta)
+		b.updateBackgroundStream(props.Part.SessionID, props.Part.MessageID, props.Part.Type, props.Part.Text, props.Part.Tool, props.Part.State, props.Delta)
 		return
 	}
 	// Части user-эха (копия запроса пользователя) не должны попадать в стрим.
@@ -430,6 +436,10 @@ func (b *Bot) onMessagePartUpdated(ev backend.Event) {
 	}
 	st := b.currentStream()
 	if st == nil {
+		// Гонка с переключением: сессия уже выбрана, а foreground-стрим ещё
+		// не установлен. Продолжаем обновлять её фоновое окно, если оно есть,
+		// чтобы событие не потерялось.
+		b.updateBackgroundStream(props.Part.SessionID, props.Part.MessageID, props.Part.Type, props.Part.Text, props.Part.Tool, props.Part.State, props.Delta)
 		return
 	}
 	st.touch()
@@ -437,12 +447,7 @@ func (b *Bot) onMessagePartUpdated(ev backend.Event) {
 	defer st.mu.Unlock()
 	switch props.Part.Type {
 	case "step-start":
-		if r := strings.TrimSpace(st.reasoning); r != "" {
-			st.reasoningLog = append(st.reasoningLog, r)
-			if len(st.reasoningLog) > 200 {
-				st.reasoningLog = st.reasoningLog[len(st.reasoningLog)-200:]
-			}
-		}
+		st.reasoningLog = appendReasoningStep(st.reasoningLog, st.reasoning)
 		st.status = ""
 		st.reasoning = ""
 	case "text":
@@ -503,6 +508,12 @@ func (b *Bot) onMessageUpdated(ev backend.Event) {
 		sess = props.Info.SessionID
 	}
 	if sess != b.currentSessionID() {
+		// User-эхо запроса откреплённой сессии: запоминаем id её копии, чтобы
+		// части запроса пользователя не попадали в фоновое окно.
+		if props.Info.Role == "user" && props.Info.ID != "" && sess != "" {
+			b.setBackgroundUserEcho(sess, props.Info.ID)
+			return
+		}
 		if b.finishBackgroundStream(sess, props.SessionID, props.Info) {
 			return
 		}
@@ -532,10 +543,11 @@ func (b *Bot) onMessageUpdated(ev backend.Event) {
 	b.finishStream(st, props.Info, "")
 }
 
-// updateBackgroundStream обновляет одно сообщение откреплённой сессии. Частые
-// WS-дельты намеренно сгруппированы: Telegram не принимает бесконечный поток
-// editMessageText и индикатор должен оставаться читаемым.
-func (b *Bot) updateBackgroundStream(sessionID, partType, text, tool string, state toolPartState, delta string) {
+// updateBackgroundStream обновляет одно сообщение откреплённой сессии. Логика
+// разбора частей та же, что у foreground-стрима, — фоновое окно копит журнал
+// тулов и reasoning, а не только последнюю строку. Частые WS-дельты намеренно
+// сгруппированы: Telegram не принимает бесконечный поток editMessageText.
+func (b *Bot) updateBackgroundStream(sessionID, partMessageID, partType, text, tool string, state toolPartState, delta string) {
 	b.mu.Lock()
 	st := b.background[sessionID]
 	b.mu.Unlock()
@@ -544,9 +556,19 @@ func (b *Bot) updateBackgroundStream(sessionID, partType, text, tool string, sta
 	}
 
 	st.mu.Lock()
+	// Части user-эха запроса не должны попадать в фоновое окно.
+	if partMessageID != "" && partMessageID == st.userMsgID {
+		st.mu.Unlock()
+		return
+	}
 	switch partType {
+	case "step-start":
+		st.reasoningLog = appendReasoningStep(st.reasoningLog, st.reasoning)
+		st.status = ""
+		st.reasoning = ""
 	case "text":
 		st.status = ""
+		st.reasoning = ""
 		if delta != "" {
 			st.partial += delta
 		} else {
@@ -556,20 +578,45 @@ func (b *Bot) updateBackgroundStream(sessionID, partType, text, tool string, sta
 		switch state.Status {
 		case "pending", "running":
 			st.status = toolStatus(tool, state)
-		case "completed", "error":
+		case "completed":
 			st.status = ""
+			st.log = appendToolLog(st.log, "✓ "+toolDesc(tool, state))
+		case "error":
+			st.status = ""
+			line := "✗ " + toolDesc(tool, state)
+			if errMsg := state.Error; errMsg != "" {
+				line += " — " + shortLine(errMsg, 80)
+			}
+			st.log = appendToolLog(st.log, line)
 		}
 	case "reasoning":
-		st.status = "💭 Агент обдумывает следующий шаг"
+		st.status = ""
+		if delta != "" {
+			st.reasoning += delta
+		} else {
+			st.reasoning = text
+		}
 	}
 	if time.Since(st.lastSent) < time.Second {
 		st.mu.Unlock()
 		return
 	}
 	st.lastSent = time.Now()
-	chatID, messageID, title, partial, status := st.chatID, st.messageID, st.title, st.partial, st.status
+	chatID, messageID, title := st.chatID, st.messageID, st.title
+	preview := renderPreview(st.log, st.status, st.partial, st.reasoning)
 	st.mu.Unlock()
-	b.editMessageHTML(context.Background(), chatID, messageID, backgroundProgressHTML(title, partial, status))
+	b.editMessageHTML(context.Background(), chatID, messageID, backgroundProgressHTML(title, preview))
+}
+
+// setBackgroundUserEcho запоминает id user-эхо запроса откреплённой сессии.
+func (b *Bot) setBackgroundUserEcho(sessionID, messageID string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if st := b.background[sessionID]; st != nil {
+		st.mu.Lock()
+		st.userMsgID = messageID
+		st.mu.Unlock()
+	}
 }
 
 // finishBackgroundStream завершает именно ранее откреплённую сессию. true
@@ -611,15 +658,82 @@ func (b *Bot) finishBackgroundStream(sessionID, topLevelSessionID string, info b
 	return true
 }
 
-func backgroundProgressHTML(title, partial, status string) string {
-	text := strings.TrimSpace(partial)
-	if text == "" {
-		text = status
-	}
+// backgroundProgressHTML рендерит живое состояние фонового окна: заголовок
+// сессии и тот же превью-текст, что и у foreground-стрима (последние тулы,
+// текущий статус / черновик ответа / reasoning).
+func backgroundProgressHTML(title, preview string) string {
+	text := strings.TrimSpace(preview)
 	if text == "" {
 		text = "💭 Выполняется…"
 	}
 	return "📎 Фоновая сессия <b>" + escapeHTML(title) + "</b>\n" + escapeHTML(shortLine(text, 1500))
+}
+
+// backgroundPreview возвращает текущий превью-текст фонового окна.
+func backgroundPreview(bg *backgroundStream) string {
+	bg.mu.Lock()
+	defer bg.mu.Unlock()
+	return renderPreview(bg.log, bg.status, bg.partial, bg.reasoning)
+}
+
+// backgroundFromStream строит фоновое окно из текущего стрима, сохраняя весь
+// накопленный контекст: после повторного переключения журнал тулов и reasoning
+// продолжаются с того же места, а не начинаются заново.
+func backgroundFromStream(st *Stream, title, userEcho string) *backgroundStream {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return &backgroundStream{
+		chatID:       st.chatID,
+		messageID:    st.messageID,
+		title:        title,
+		started:      st.started,
+		userMsgID:    userEcho,
+		partial:      st.partial,
+		reasoning:    st.reasoning,
+		reasoningLog: append([]string(nil), st.reasoningLog...),
+		status:       st.status,
+		log:          append([]string(nil), st.log...),
+	}
+}
+
+// attachBackgroundLocked превращает живое фоновое окно обратно в
+// foreground-стрим: то же сообщение продолжает обновляться, но уже со всей
+// механикой стрима (журнал, reasoning, финализация, stall-страховка).
+// Вызывается под b.mu — суффикс Locked об этом и напоминает; блокировка bg
+// берётся внутри, параллельный updateBackgroundStream отпускает b.mu до работы
+// с bg, поэтому порядок блокировок безопасен.
+//
+// busy выставляется намеренно: запрос реально в полёте, шлюз отклонит
+// конкурентный запрос в эту же сессию, а новые сообщения пользователя честно
+// встанут в общую очередь и уйдут после финализации.
+func (b *Bot) attachBackgroundLocked(bg *backgroundStream, sessionID string) *Stream {
+	bg.mu.Lock()
+	st := &Stream{
+		sessionID:    sessionID,
+		chatID:       bg.chatID,
+		messageID:    bg.messageID,
+		started:      bg.started,
+		partial:      bg.partial,
+		reasoning:    bg.reasoning,
+		reasoningLog: append([]string(nil), bg.reasoningLog...),
+		status:       bg.status,
+		log:          append([]string(nil), bg.log...),
+		lastActivity: time.Now(),
+		done:         make(chan struct{}),
+		stopped:      make(chan struct{}),
+	}
+	userEcho := bg.userMsgID
+	bg.mu.Unlock()
+	if st.started.IsZero() {
+		st.started = time.Now()
+	}
+	delete(b.background, sessionID)
+	b.stream = st
+	b.busy = true
+	ctx, cancel := context.WithCancel(context.Background())
+	b.reqCtx, b.reqCancel = ctx, cancel
+	b.userMsgID = userEcho
+	return st
 }
 
 // notifyBackgroundCompletion сообщает о завершении сессии, от которой
@@ -647,10 +761,29 @@ func (b *Bot) notifyBackgroundCompletion(sessionID, topLevelSessionID string, in
 
 // appendLog records a finished tool call, keeping a bounded history.
 func (st *Stream) appendLog(line string) {
-	st.log = append(st.log, shortLine(line, 100))
-	if len(st.log) > 500 {
-		st.log = st.log[len(st.log)-500:]
+	st.log = appendToolLog(st.log, line)
+}
+
+// appendToolLog добавляет строку в журнал тулов, ограничивая её длину и глубину
+// истории. Общая для foreground-стрима и фоновых окон.
+func appendToolLog(log []string, line string) []string {
+	log = append(log, shortLine(line, 100))
+	if len(log) > 500 {
+		log = log[len(log)-500:]
 	}
+	return log
+}
+
+// appendReasoningStep переносит reasoning завершённого шага в историю,
+// ограничивая её глубину. Общая для foreground-стрима и фоновых окон.
+func appendReasoningStep(log []string, reasoning string) []string {
+	if r := strings.TrimSpace(reasoning); r != "" {
+		log = append(log, r)
+		if len(log) > 200 {
+			log = log[len(log)-200:]
+		}
+	}
+	return log
 }
 
 // toolDesc renders "tool: input" — the part of the status/log line without
@@ -1016,23 +1149,30 @@ func (b *Bot) previewText() string {
 	}
 	st.mu.Lock()
 	defer st.mu.Unlock()
+	return renderPreview(st.log, st.status, st.partial, st.reasoning)
+}
+
+// renderPreview собирает живой превью-текст: последние завершённые тулы, затем
+// текущую активность (статус тул-вызова / черновик ответа / reasoning).
+// Один рендер для foreground-стрима и фоновых окон, чтобы они выглядели одинаково.
+func renderPreview(log []string, status, partial, reasoning string) string {
 	var sb strings.Builder
 	start := 0
-	if n := len(st.log); n > 6 {
+	if n := len(log); n > 6 {
 		start = n - 6
 	}
-	for _, l := range st.log[start:] {
+	for _, l := range log[start:] {
 		sb.WriteString(l)
 		sb.WriteByte('\n')
 	}
 	switch {
-	case st.status != "":
-		sb.WriteString(st.status)
-	case st.partial != "":
-		sb.WriteString(st.partial)
-	case st.reasoning != "":
+	case status != "":
+		sb.WriteString(status)
+	case partial != "":
+		sb.WriteString(partial)
+	case reasoning != "":
 		sb.WriteString("🧠 ")
-		sb.WriteString(shortLine(st.reasoning, 200))
+		sb.WriteString(shortLine(reasoning, 200))
 	}
 	return sb.String()
 }

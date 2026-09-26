@@ -118,6 +118,14 @@ agents/                      — документы для дальнейшей 
   `/api/v1/ws?session=*` с реконнектом. Обрабатываются типы:
   `message.part.updated`, `message.updated`, `permission.asked`,
   `question.asked`.
+- **Фоновые сессии** — `/detach` открепляет текущий запрос: его `Stream`
+  превращается в `backgroundStream` (то же сообщение продолжает показывать
+  журнал тулов, reasoning и черновик, с троттлингом 1s). Переключение на
+  такую сессию через `/sessions` (`attachBackgroundLocked`) возвращает её в
+  foreground-стрим: busy выставляется (запрос реально в полёте), preview- и
+  timeout-циклы запускаются заново, поэтому действия агента снова видны, а
+  финальный ответ и stall-страховка работают как обычно. Фоновые окна
+  копят тот же контекст, что и foreground, — при attach ничего не теряется.
 - **Permissions** — режимы `PERMISSION_MODE` (на шлюзе): `ask` (кнопки ✅ один раз /
   🟢 всегда / ❌ отклонить), `allow`, `deny`. Соответствие `permissionID`
   → вопрос в `b.perms`, ответ уходит в `POST /api/v1/sessions/{id}/permissions/{pid}`.

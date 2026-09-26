@@ -64,7 +64,7 @@ func (b *Bot) cmdHelp(msg *telego.Message) {
 /reset — начать новую сессию opencode
 /new — новая сессия, не удаляя прежнюю (как в OpenCode)
 /session — информация о текущей сессии
-/sessions — список сессий и переключение между ними
+/sessions — список сессий и переключение (фоновая откроется с живым прогрессом)
 /rename <i>[название]</i> — переименовать текущую сессию
 /abort — прервать текущий запрос
 /detach — оставить текущую сессию работать в фоне
@@ -258,6 +258,7 @@ func (b *Bot) cmdDetach(msg *telego.Message) {
 	st := b.stream
 	sessionID := b.sessionID
 	busy := b.busy
+	userEcho := b.userMsgID
 	b.mu.Unlock()
 	if !busy || st == nil || sessionID == "" {
 		b.send(msg.Chat.ID, "Нет выполняющейся сессии, которую можно оставить в фоне.")
@@ -273,11 +274,12 @@ func (b *Bot) cmdDetach(msg *telego.Message) {
 	st.finalizeOnce.Do(func() {
 		detached = true
 		// Оставляем то же сообщение в роли живого индикатора фоновой работы.
-		// Карта допускает несколько таких сессий одновременно.
+		// Карта допускает несколько таких сессий одновременно. Накопленный
+		// контекст (журнал тулов, reasoning, черновик) переезжает в окно —
+		// после переключения обратно агент продолжит с того же места.
 		b.mu.Lock()
-		b.background[sessionID] = &backgroundStream{
-			chatID: st.chatID, messageID: st.messageID, title: title,
-		}
+		bg := backgroundFromStream(st, title, userEcho)
+		b.background[sessionID] = bg
 		b.mu.Unlock()
 		if st.done != nil {
 			close(st.done)
@@ -293,7 +295,7 @@ func (b *Bot) cmdDetach(msg *telego.Message) {
 		b.userMsgID = ""
 		b.mu.Unlock()
 		b.editMessageHTML(context.Background(), st.chatID, st.messageID,
-			"📎 Сессия <b>"+escapeHTML(title)+"</b> продолжает работу в фоне.")
+			backgroundProgressHTML(title, backgroundPreview(bg)))
 	})
 	if !detached {
 		b.send(msg.Chat.ID, "Запрос уже завершился; открой /sessions для выбора сессии.")

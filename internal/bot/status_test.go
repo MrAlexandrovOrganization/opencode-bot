@@ -64,3 +64,68 @@ func TestToolStatus(t *testing.T) {
 		})
 	}
 }
+
+// TestRenderPreview — живое превью и foreground-стрима, и фонового окна:
+// последние завершённые тулы, затем текущая активность в приоритете
+// статус тул-вызова > черновик ответа > reasoning.
+func TestRenderPreview(t *testing.T) {
+	log := []string{"✓ read: a.go", "✗ bash: make test — exit 1"}
+
+	tests := []struct {
+		name      string
+		log       []string
+		status    string
+		partial   string
+		reasoning string
+		want      string
+	}{
+		{
+			name:      "status has priority over partial and reasoning",
+			log:       log,
+			status:    "⚙️ bash: make check",
+			partial:   "Чиню очередь",
+			reasoning: "думаю",
+			want:      "✓ read: a.go\n✗ bash: make test — exit 1\n⚙️ bash: make check",
+		},
+		{
+			name:      "partial without status",
+			log:       log,
+			partial:   "Чиню очередь",
+			reasoning: "думаю",
+			want:      "✓ read: a.go\n✗ bash: make test — exit 1\nЧиню очередь",
+		},
+		{
+			name:      "reasoning is prefixed and shortened",
+			log:       nil,
+			reasoning: "обычный ход мысли",
+			want:      "🧠 обычный ход мысли",
+		},
+		{name: "nothing to show", log: nil, want: ""},
+		{
+			name: "only the last six tool lines are kept",
+			log:  []string{"1", "2", "3", "4", "5", "6", "7", "8"},
+			want: "3\n4\n5\n6\n7\n8\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := renderPreview(tt.log, tt.status, tt.partial, tt.reasoning); got != tt.want {
+				t.Errorf("renderPreview() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestBackgroundProgressHTML — фоновое окно без активности показывает
+// «Выполняется…», с активностью — заголовок сессии и общий превью-текст.
+func TestBackgroundProgressHTML(t *testing.T) {
+	if got := backgroundProgressHTML("Моя сессия", ""); !strings.Contains(got, "💭 Выполняется…") {
+		t.Errorf("пустое окно: %q", got)
+	}
+	got := backgroundProgressHTML("Моя сессия", "✓ bash: make check")
+	want := "📎 Фоновая сессия <b>Моя сессия</b>\n✓ bash: make check"
+	if got != want {
+		t.Errorf("backgroundProgressHTML() = %q, want %q", got, want)
+	}
+}

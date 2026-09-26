@@ -676,6 +676,67 @@ func TestE2EDetachKeepsBackendRequestAndNotifiesOnCompletion(t *testing.T) {
 	ft.waitText(t, "Готово")
 }
 
+// TestE2ESwitchBackToDetachedSession — после /detach сессия работает в фоне,
+// а переключение обратно через /sessions превращает её фоновое окно в
+// полноценный foreground-стрим: журнал тулов снова виден, busy выставляется
+// (запрос в полёте) и финальный ответ доходит до пользователя — раньше он
+// терялся, потому что у выбранной сессии не было стрима.
+func TestE2ESwitchBackToDetachedSession(t *testing.T) {
+	ft := newFakeTelegram(t)
+	fb := newFakeBackend(t)
+	fb.sessions = twoSessions(time.Now())
+	fb.stored["asm1"] = `{"id":"asm1","role":"assistant","status":"completed","parts":[{"type":"text","text":"Ответ агента"}]}`
+	b := newTestBot(t, ft, fb)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go b.eventLoop(ctx)
+	select {
+	case <-fb.wsReady:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ws-подписка не поднялась")
+	}
+
+	b.mu.Lock()
+	b.sessionID = testSessID
+	b.mu.Unlock()
+
+	b.handleUpdate(textUpdate("запусти задачу"))
+	waitFor(t, func() bool { return fb.receivedMessages() == 1 })
+
+	b.handleUpdate(textUpdate("/detach"))
+	ft.waitText(t, "Открепил сессию")
+
+	// Пока сессия в фоне, агент закончил тул — окно показывает журнал.
+	fb.push(t, "message.part.updated",
+		`{"part":{"id":"p-tool","messageID":"asm1","sessionID":"`+testSessID+`","type":"tool","text":"","tool":"bash","state":{"status":"completed","title":"make check","input":{},"error":""}},"delta":""}`)
+	ft.waitText(t, "✓ bash: make check")
+
+	b.handleCallback(&telego.CallbackQuery{
+		ID:      "c1",
+		Data:    "sess:switch:" + testSessID,
+		From:    telego.User{ID: testRootID},
+		Message: &telego.Message{MessageID: 2, Chat: telego.Chat{ID: testChatID, Type: "private"}},
+	})
+	ft.waitText(t, "Теперь активна сессия")
+
+	waitFor(t, func() bool {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		return b.busy && b.stream != nil && len(b.background) == 0
+	})
+	// Накопленная активность показывается сразу, не дожидаясь тикера превью.
+	ft.waitText(t, "💭 <i>выполняется…")
+
+	fb.push(t, "message.updated", evFinal)
+	ft.waitText(t, "Ответ агента")
+	waitFor(t, func() bool {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		return !b.busy
+	})
+}
+
 // TestE2EErrorFinal — финальный message.updated c ошибкой показывает ❌.
 func TestE2EErrorFinal(t *testing.T) {
 	ft := newFakeTelegram(t)

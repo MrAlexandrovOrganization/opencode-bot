@@ -167,22 +167,41 @@ func (b *Bot) handleSessionSwitch(query *telego.CallbackQuery) {
 		return
 	}
 
-	// У каждой сессии свой pending-вопрос: при переключении восстанавливаем
-	// именно её состояние, не ломая фоновые сессии.
-	b.mu.Lock()
-	b.sessionID = sessionID
-	b.userMsgID = ""
-	b.pendingQ = b.pendingQs[sessionID]
-	b.mu.Unlock()
-	slog.Info("session switched", "id", sessionID)
-
 	title := strings.TrimSpace(s.Title)
 	if title == "" {
 		title = shortLine(sessionID, 24)
 	}
+
+	// У каждой сессии свой pending-вопрос: при переключении восстанавливаем
+	// именно её состояние, не ломая фоновые сессии. Если целевая сессия
+	// работала в фоне — её окно сразу превращается в foreground-стрим, чтобы
+	// пользователь снова видел действия агента, а не статичную подпись.
+	b.mu.Lock()
+	b.sessionID = sessionID
+	b.userMsgID = ""
+	b.pendingQ = b.pendingQs[sessionID]
+	var promoted *Stream
+	if bg := b.background[sessionID]; bg != nil {
+		promoted = b.attachBackgroundLocked(bg, sessionID)
+	}
+	b.mu.Unlock()
+	slog.Info("session switched", "id", sessionID, "promoted", promoted != nil)
+
 	_ = b.answerCallback(query, "✅ Сессия активна")
 	if msg, ok := query.Message.(*telego.Message); ok {
 		b.sendHTML(msg.Chat.ID, "Теперь активна сессия: <b>"+escapeHTML(title)+"</b>", nil)
+	}
+
+	if promoted != nil {
+		// Превью и watchdog запроса — как у обычного стрима. Первую отрисовку
+		// делаем сразу: не ждём тикер, чтобы накопленная активность была видна
+		// сразу после переключения.
+		go b.previewLoop(promoted, promoted.chatID)
+		go b.timeoutLoop(promoted)
+		if preview := b.previewText(); preview != "" {
+			b.editMessageHTML(context.Background(), promoted.chatID, promoted.messageID,
+				"💭 <i>выполняется…</i>\n\n"+escapeHTML(truncate(preview)))
+		}
 	}
 }
 
