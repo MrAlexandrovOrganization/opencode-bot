@@ -17,6 +17,140 @@ import (
 // maxSessionsInList — сколько сессий показываем в /sessions (кнопок с каждой).
 const maxSessionsInList = 10
 
+// sessionTitleLen — максимальная длина названия сессии, выводимого в списке и
+// в кнопках переключения.
+const sessionTitleLen = 48
+
+// genericSessionTitles — заглушки, которые бот и opencode ставят сессии по
+// умолчанию. Они одинаковы у всех сессий и не говорят, о чём диалог, поэтому
+// в списках и кнопках заменяются первым сообщением пользователя.
+var genericSessionTitles = map[string]bool{
+	"":             true,
+	"telegram-bot": true,
+	"opencode":     true,
+	"new session":  true,
+}
+
+// isGenericSessionTitle — настоящее ли это название сессии, а не заглушка.
+func isGenericSessionTitle(title string) bool {
+	return genericSessionTitles[strings.ToLower(strings.TrimSpace(title))]
+}
+
+// titleFromText превращает текст в однострочное название сессии.
+func titleFromText(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if s == "" {
+		return ""
+	}
+	return shortLine(s, sessionTitleLen)
+}
+
+// titleFromMessages извлекает название сессии из её истории: первое текстовое
+// сообщение пользователя, иначе имя первого вложения.
+func titleFromMessages(msgs []backend.StoredMessage) string {
+	var firstFile string
+	for i := range msgs {
+		m := &msgs[i]
+		if m.Role != "user" {
+			continue
+		}
+		if t := titleFromText(m.Text()); t != "" {
+			return t
+		}
+		if files := m.Files(); len(files) > 0 && firstFile == "" {
+			firstFile = files[0]
+		}
+	}
+	if firstFile != "" {
+		return "📎 " + shortLine(firstFile, sessionTitleLen-2)
+	}
+	return ""
+}
+
+// sessionTitleFromRequest извлекает название сессии из первого запроса:
+// первый непустой текст, иначе имя вложения (фото без подписи и т.п.).
+func sessionTitleFromRequest(req backend.MessageRequest) string {
+	for _, p := range req.Parts {
+		if p.Type == "text" {
+			if t := titleFromText(p.Text); t != "" {
+				return t
+			}
+		}
+	}
+	for _, p := range req.Parts {
+		if p.Type == "file" && strings.TrimSpace(p.Filename) != "" {
+			return "📎 " + shortLine(strings.TrimSpace(p.Filename), sessionTitleLen-2)
+		}
+	}
+	return ""
+}
+
+// displaySessionTitle — название сессии для списка и кнопок: осмысленное из
+// шлюза, иначе первое сообщение пользователя из уже загруженной истории.
+func displaySessionTitle(s backend.Session, msgs []backend.StoredMessage) string {
+	title := strings.TrimSpace(s.Title)
+	if !isGenericSessionTitle(title) {
+		return title
+	}
+	if derived := titleFromMessages(msgs); derived != "" {
+		return derived
+	}
+	if title != "" {
+		return title
+	}
+	return shortLine(s.ID, 24)
+}
+
+// displayTitle — то же, но историю загружает сам (когда её ещё нет под рукой).
+func (b *Bot) displayTitle(ctx context.Context, s *backend.Session) string {
+	if title := strings.TrimSpace(s.Title); !isGenericSessionTitle(title) {
+		return title
+	}
+	if msgs, err := b.backend.ListMessages(ctx, s.ID); err == nil {
+		if derived := titleFromMessages(msgs); derived != "" {
+			return derived
+		}
+	}
+	if title := strings.TrimSpace(s.Title); title != "" {
+		return title
+	}
+	return shortLine(s.ID, 24)
+}
+
+// sessionTitle — понятное название сессии по её ID (для уведомлений о фоновых
+// сессиях, /detach и /session).
+func (b *Bot) sessionTitle(ctx context.Context, sessionID string) string {
+	s, err := b.backend.GetSession(ctx, sessionID)
+	if err != nil {
+		return shortLine(sessionID, 24)
+	}
+	return b.displayTitle(ctx, s)
+}
+
+// ensureSessionTitle называет свежую сессию (только что созданную или взятую
+// пустой) по первому запросу, если у неё всё ещё заглушка. Вызывается один раз
+// — перед первой отправкой сообщения, — поэтому списки, кнопки и уведомления
+// о фоновых сессиях показывают осмысленное название, а не «telegram-bot».
+func (b *Bot) ensureSessionTitle(ctx context.Context, sessionID, fallback string) {
+	fallback = strings.TrimSpace(fallback)
+	if sessionID == "" || fallback == "" {
+		return
+	}
+	s, err := b.backend.GetSession(ctx, sessionID)
+	if err != nil {
+		slog.Debug("auto title: get session", "id", sessionID, "error", err)
+		return
+	}
+	if !isGenericSessionTitle(s.Title) {
+		return
+	}
+	if _, err := b.backend.RenameSession(ctx, sessionID, fallback); err != nil {
+		slog.Debug("auto title: rename", "id", sessionID, "error", err)
+		return
+	}
+	slog.Info("session auto-titled", "id", sessionID, "title", fallback)
+}
+
 // cmdSessions показывает список сессий с кнопками переключения.
 func (b *Bot) cmdSessions(msg *telego.Message) {
 	ctx := context.Background()
@@ -44,30 +178,32 @@ func (b *Bot) cmdSessions(msg *telego.Message) {
 		sessions = sessions[:maxSessionsInList]
 	}
 
-	// Считаем сообщения в каждой сессии (конкурентно — их немного).
-	counts := make([]int, len(sessions))
+	// Загружаем историю каждой сессии (конкурентно — их немного): она нужна
+	// и для счётчика сообщений, и для названия, если у сессии ещё заглушка.
+	histories := make([][]backend.StoredMessage, len(sessions))
 	var wg sync.WaitGroup
 	for i, s := range sessions {
 		wg.Add(1)
 		go func(i int, id string) {
 			defer wg.Done()
 			if msgs, err := b.backend.ListMessages(ctx, id); err == nil {
-				counts[i] = len(msgs)
+				histories[i] = msgs
 			}
 		}(i, s.ID)
 	}
 	wg.Wait()
 
+	titles := make([]string, len(sessions))
+	for i, s := range sessions {
+		titles[i] = displaySessionTitle(s, histories[i])
+	}
+
 	current := b.currentSessionID()
 	var sb strings.Builder
 	sb.WriteString("<b>Сессии</b>\n\n")
 	for i, s := range sessions {
-		title := strings.TrimSpace(s.Title)
-		if title == "" {
-			title = shortLine(s.ID, 24)
-		}
-		line := fmt.Sprintf("%s <code>%s</code> · 💬 %d · %s",
-			sessionStateIcon(activityBySession[s.ID]), escapeHTML(title), counts[i], s.CreatedAt.Format("02.01 15:04"))
+		line := fmt.Sprintf("%s %s · 💬 %d · %s",
+			sessionStateIcon(activityBySession[s.ID]), htmlBold(titles[i]), len(histories[i]), s.CreatedAt.Format("02.01 15:04"))
 		if status := activityBySession[s.ID].Status; status != "" {
 			line += " · " + escapeHTML(shortLine(status, 48))
 		}
@@ -82,16 +218,14 @@ func (b *Bot) cmdSessions(msg *telego.Message) {
 	}
 
 	var rows [][]telego.InlineKeyboardButton
-	for _, s := range sessions {
+	for i, s := range sessions {
 		if s.ID == current {
 			continue
 		}
-		title := strings.TrimSpace(s.Title)
-		if title == "" {
-			title = shortLine(s.ID, 24)
-		}
+		// Название в кнопке — то же, что и в строке списка; длину ограничиваем,
+		// чтобы Telegram не отклонил всю клавиатуру (лимит 64 символа).
 		rows = append(rows, []telego.InlineKeyboardButton{{
-			Text:         "Переключиться: " + title,
+			Text:         shortLine("Переключиться: "+titles[i], 64),
 			CallbackData: "sess:switch:" + s.ID,
 		}})
 	}
@@ -135,7 +269,7 @@ func (b *Bot) cmdRename(msg *telego.Message) {
 		b.send(msg.Chat.ID, "Не удалось переименовать: "+err.Error())
 		return
 	}
-	b.sendHTML(msg.Chat.ID, "✅ Сессия переименована: <code>"+escapeHTML(args)+"</code>", nil)
+	b.sendHTML(msg.Chat.ID, "✅ Сессия переименована: "+htmlCode(args), nil)
 }
 
 // handleSessionSwitch обрабатывает нажатие кнопки «Переключиться» в /sessions.
@@ -161,16 +295,17 @@ func (b *Bot) handleSessionSwitch(query *telego.CallbackQuery) {
 		return
 	}
 
-	s, err := b.backend.ResumeSession(context.Background(), sessionID)
+	ctx := context.Background()
+	s, err := b.backend.ResumeSession(ctx, sessionID)
 	if err != nil {
 		_ = b.answerCallback(query, "❌ "+err.Error())
 		return
 	}
 
-	title := strings.TrimSpace(s.Title)
-	if title == "" {
-		title = shortLine(sessionID, 24)
-	}
+	// Историю берём сразу: по ней же считаем название сессии, если у неё ещё
+	// заглушка, и сразу восстанавливаем диалог в чате.
+	msgs, histErr := b.backend.ListMessages(ctx, sessionID)
+	title := displaySessionTitle(*s, msgs)
 
 	// У каждой сессии свой pending-вопрос: при переключении восстанавливаем
 	// именно её состояние, не ломая фоновые сессии. Если целевая сессия
@@ -189,7 +324,14 @@ func (b *Bot) handleSessionSwitch(query *telego.CallbackQuery) {
 
 	_ = b.answerCallback(query, "✅ Сессия активна")
 	if msg, ok := query.Message.(*telego.Message); ok {
-		b.sendHTML(msg.Chat.ID, "Теперь активна сессия: <b>"+escapeHTML(title)+"</b>", nil)
+		chatID := msg.Chat.ID
+		b.sendHTML(chatID, "Теперь активна сессия: "+htmlBold(title), nil)
+		if histErr != nil {
+			slog.Warn("session history", "session", sessionID, "error", histErr)
+			b.sendHTML(chatID, "⚠️ Не удалось загрузить историю сессии.", nil)
+		} else {
+			b.sendSessionHistory(chatID, title, msgs)
+		}
 	}
 
 	if promoted != nil {

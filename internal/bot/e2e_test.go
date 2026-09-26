@@ -41,6 +41,9 @@ type fakeTelegram struct {
 
 type sentMessage struct {
 	text string
+	// replyMarkup — незапарсенный inline-клавиатура сообщения (кнопки важны
+	// для /sessions: по ним видно, какими названиями бот подписывает сессии).
+	replyMarkup json.RawMessage
 }
 
 func newFakeTelegram(t *testing.T) *fakeTelegram {
@@ -70,14 +73,15 @@ func (ft *fakeTelegram) route(w http.ResponseWriter, r *http.Request) {
 
 func (ft *fakeTelegram) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	var params struct {
-		ChatID int64  `json:"chat_id"`
-		Text   string `json:"text"`
+		ChatID      int64           `json:"chat_id"`
+		Text        string          `json:"text"`
+		ReplyMarkup json.RawMessage `json:"reply_markup"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&params)
 	ft.mu.Lock()
 	ft.nextID++
 	id := ft.nextID
-	ft.messages[id] = &sentMessage{text: params.Text}
+	ft.messages[id] = &sentMessage{text: params.Text, replyMarkup: params.ReplyMarkup}
 	ft.mu.Unlock()
 	writeJSON(w, map[string]any{
 		"ok": true,
@@ -135,6 +139,33 @@ func (ft *fakeTelegram) waitText(t *testing.T, substr string) []string {
 	return nil
 }
 
+// buttonTexts возвращает тексты всех inline-кнопок из всех отправленных
+// сообщений (для проверки подписей сессий в /sessions).
+func (ft *fakeTelegram) buttonTexts() []string {
+	ft.mu.Lock()
+	defer ft.mu.Unlock()
+	var out []string
+	for _, m := range ft.messages {
+		if len(m.replyMarkup) == 0 {
+			continue
+		}
+		var kb struct {
+			InlineKeyboard [][]struct {
+				Text string `json:"text"`
+			} `json:"inline_keyboard"`
+		}
+		if err := json.Unmarshal(m.replyMarkup, &kb); err != nil {
+			continue
+		}
+		for _, row := range kb.InlineKeyboard {
+			for _, btn := range row {
+				out = append(out, btn.Text)
+			}
+		}
+	}
+	return out
+}
+
 // ── fake backend (opencode-backend) ──────────────────────────────────────────
 
 type fakeBackend struct {
@@ -144,15 +175,16 @@ type fakeBackend struct {
 	mu          sync.Mutex
 	gotMsg      []backend.MessageRequest // принятые send-message запросы
 	gotCommands []struct{ Name, Arguments string }
-	stored      map[string]string         // messageID -> тело StoredMessage (JSON)
-	replQ       [][][]string              // принятые answers на вопрос
-	created     int                       // сколько раз создавалась сессия
-	sessions    []backend.Session         // выдаются в GET /api/v1/sessions
-	activities  []backend.SessionActivity // выдаются в GET /api/v1/sessions/activity
-	msgCount    map[string]int            // sessionID -> число сообщений
-	resumed     []string                  // вызванные POST /resume
-	renamed     map[string]string         // sessionID -> новый title
-	deleted     []string                  // вызванные DELETE /sessions/{id}
+	stored      map[string]string                  // messageID -> тело StoredMessage (JSON)
+	replQ       [][][]string                       // принятые answers на вопрос
+	created     int                                // сколько раз создавалась сессия
+	sessions    []backend.Session                  // выдаются в GET /api/v1/sessions
+	activities  []backend.SessionActivity          // выдаются в GET /api/v1/sessions/activity
+	msgCount    map[string]int                     // sessionID -> число сообщений
+	hist        map[string][]backend.StoredMessage // sessionID -> история (если задана, заменяет msgCount)
+	resumed     []string                           // вызванные POST /resume
+	renamed     map[string]string                  // sessionID -> новый title
+	deleted     []string                           // вызванные DELETE /sessions/{id}
 
 	pushCh  chan []byte
 	wsReady chan struct{}
@@ -166,11 +198,13 @@ func newFakeBackend(t *testing.T) *fakeBackend {
 		wsReady:  make(chan struct{}),
 		stored:   map[string]string{},
 		msgCount: map[string]int{},
+		hist:     map[string][]backend.StoredMessage{},
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v1/sessions", fb.handleCreateSession)
 	mux.HandleFunc("GET /api/v1/sessions", fb.handleListSessions)
 	mux.HandleFunc("GET /api/v1/sessions/activity", fb.handleListSessionActivities)
+	mux.HandleFunc("GET /api/v1/sessions/{id}", fb.handleGetSession)
 	mux.HandleFunc("GET /api/v1/commands", fb.handleListCommands)
 	mux.HandleFunc("POST /api/v1/sessions/{id}/resume", fb.handleResumeSession)
 	mux.HandleFunc("PATCH /api/v1/sessions/{id}", fb.handleRenameSession)
@@ -211,6 +245,12 @@ func (fb *fakeBackend) handleListSessionActivities(w http.ResponseWriter, r *htt
 func (fb *fakeBackend) handleListMessages(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	fb.mu.Lock()
+	if h, ok := fb.hist[id]; ok {
+		out := append([]backend.StoredMessage(nil), h...)
+		fb.mu.Unlock()
+		writeJSON(w, out)
+		return
+	}
 	n := fb.msgCount[id]
 	fb.mu.Unlock()
 	var out []map[string]any
@@ -218,6 +258,22 @@ func (fb *fakeBackend) handleListMessages(w http.ResponseWriter, r *http.Request
 		out = append(out, map[string]any{"id": "m" + id + string(rune('a'+i))})
 	}
 	writeJSON(w, out)
+}
+
+// handleGetSession отдаёт сессию по ID. Если сессии нет в fb.sessions (её
+// только что создал бот), возвращается заглушка «telegram-bot» — как в
+// реальном шлюзе сразу после создания: такие названия бот обязан заменять
+// первым сообщением пользователя.
+func (fb *fakeBackend) handleGetSession(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	fb.mu.Lock()
+	sess := fb.session(id)
+	fb.mu.Unlock()
+	if sess == nil {
+		writeJSON(w, backend.Session{ID: id, Title: "telegram-bot", Directory: "/workspace", CreatedAt: time.Now()})
+		return
+	}
+	writeJSON(w, sess)
 }
 
 func (fb *fakeBackend) handleSessionEmpty(w http.ResponseWriter, r *http.Request) {
@@ -260,8 +316,8 @@ func (fb *fakeBackend) handleResumeSession(w http.ResponseWriter, r *http.Reques
 	sess := fb.session(id)
 	fb.mu.Unlock()
 	if sess == nil {
-		writeJSON(w, map[string]any{"error": "сессия не найдена"})
 		w.WriteHeader(http.StatusNotFound)
+		writeJSON(w, map[string]any{"error": "сессия не найдена"})
 		return
 	}
 	writeJSON(w, sess)
@@ -286,8 +342,8 @@ func (fb *fakeBackend) handleRenameSession(w http.ResponseWriter, r *http.Reques
 	sess := fb.session(id)
 	fb.mu.Unlock()
 	if sess == nil {
-		writeJSON(w, map[string]any{"error": "сессия не найдена"})
 		w.WriteHeader(http.StatusNotFound)
+		writeJSON(w, map[string]any{"error": "сессия не найдена"})
 		return
 	}
 	writeJSON(w, sess)
@@ -317,14 +373,18 @@ func (fb *fakeBackend) handleCreateSession(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, map[string]any{"ok": false, "error": "unauthorized"})
 		return
 	}
-	w.WriteHeader(http.StatusCreated)
+	sess := backend.Session{
+		ID: testSessID, Title: "telegram-bot", Directory: "/workspace",
+		CreatedAt: time.Now(),
+	}
 	fb.mu.Lock()
 	fb.created++
+	if fb.session(testSessID) == nil {
+		fb.sessions = append(fb.sessions, sess)
+	}
 	fb.mu.Unlock()
-	writeJSON(w, map[string]any{
-		"id": testSessID, "title": "telegram-bot", "directory": "/workspace",
-		"createdAt": time.Now().UTC().Format(time.RFC3339),
-	})
+	w.WriteHeader(http.StatusCreated)
+	writeJSON(w, sess)
 }
 
 func (fb *fakeBackend) handleSendMessage(w http.ResponseWriter, r *http.Request) {
@@ -355,8 +415,8 @@ func (fb *fakeBackend) handleGetMessage(w http.ResponseWriter, r *http.Request) 
 	body := fb.stored["asm1"]
 	fb.mu.Unlock()
 	if body == "" {
-		writeJSON(w, map[string]any{"error": "сообщение не найдено"})
 		w.WriteHeader(http.StatusNotFound)
+		writeJSON(w, map[string]any{"error": "сообщение не найдено"})
 		return
 	}
 	writeRaw(w, body)

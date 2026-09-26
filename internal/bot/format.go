@@ -15,6 +15,20 @@ var (
 	reLink        = regexp.MustCompile(`\[([^\]]+)\]\(([^)\s]+)\)`)
 )
 
+// htmlBold оборачивает обычный текст в тег Telegram HTML. Все подобные
+// функции экранируют содержимое, поэтому в них передаётся только текст —
+// готовые HTML-фрагменты (результат markdownToHTML) в них не попадают.
+func htmlBold(s string) string { return "<b>" + escapeHTML(s) + "</b>" }
+
+// htmlItalic — курсив.
+func htmlItalic(s string) string { return "<i>" + escapeHTML(s) + "</i>" }
+
+// htmlCode — моноширинный фрагмент.
+func htmlCode(s string) string { return "<code>" + escapeHTML(s) + "</code>" }
+
+// htmlBlockquote — цитата с переносами строк.
+func htmlBlockquote(s string) string { return "<blockquote>" + escapeHTML(s) + "</blockquote>" }
+
 // markdownToHTML converts markdown into a Telegram-safe HTML fragment
 // (Telegram HTML parse mode supports b/i/code/pre/blockquote/a). Everything
 // is HTML-escaped first, so the output is always valid for editMessageText.

@@ -169,6 +169,28 @@ type StoredMessage struct {
 	CreatedAt time.Time       `json:"createdAt"`
 }
 
+// Files возвращает имена файловых частей сообщения (вложения). Используется,
+// когда у сообщения нет текста — например, фото без подписи.
+func (m *StoredMessage) Files() []string {
+	if m == nil || len(m.Parts) == 0 {
+		return nil
+	}
+	var parts []struct {
+		Type     string `json:"type"`
+		Filename string `json:"filename"`
+	}
+	if err := json.Unmarshal(m.Parts, &parts); err != nil {
+		return nil
+	}
+	var out []string
+	for _, p := range parts {
+		if p.Type == "file" && strings.TrimSpace(p.Filename) != "" {
+			out = append(out, p.Filename)
+		}
+	}
+	return out
+}
+
 // Text возвращает склеенный текст текстовых частей сообщения.
 func (m *StoredMessage) Text() string {
 	if m == nil || len(m.Parts) == 0 {

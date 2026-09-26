@@ -69,13 +69,10 @@ func (b *Bot) askCurrentQuestion(p *pendingQuestions) {
 	var sb strings.Builder
 	sb.WriteString("❓ ")
 	if q.Header != "" {
-		sb.WriteString("<b>")
-		sb.WriteString(escapeHTML(q.Header))
-		sb.WriteString("</b>\n\n")
+		sb.WriteString(htmlBold(q.Header))
+		sb.WriteString("\n\n")
 	}
-	sb.WriteString("<blockquote>")
-	sb.WriteString(escapeHTML(q.Question))
-	sb.WriteString("</blockquote>")
+	sb.WriteString(htmlBlockquote(q.Question))
 
 	// Кнопки привязываем к requestID вопроса: нажатие кнопки старого
 	// сообщения не должно отвечать на текущий вопрос.

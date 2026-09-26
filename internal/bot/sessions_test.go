@@ -2,6 +2,7 @@ package bot
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -22,9 +23,12 @@ func TestReuseEmptySession(t *testing.T) {
 	fb.msgCount["sess_empty"] = 0
 	b := newTestBot(t, ft, fb)
 
-	id, err := b.sessionIDFor(context.Background())
+	id, fresh, err := b.sessionIDFor(context.Background())
 	if err != nil {
 		t.Fatalf("sessionIDFor: %v", err)
+	}
+	if !fresh {
+		t.Fatal("взятая пустая сессия должна быть «свежей» (в неё не писали)")
 	}
 	if id != "sess_empty" {
 		t.Fatalf("id = %q, want sess_empty", id)
@@ -50,9 +54,12 @@ func TestReuseEmptySessionSkipsUsed(t *testing.T) {
 	fb.msgCount["sess_empty"] = 0
 	b := newTestBot(t, ft, fb)
 
-	id, err := b.sessionIDFor(context.Background())
+	id, fresh, err := b.sessionIDFor(context.Background())
 	if err != nil {
 		t.Fatalf("sessionIDFor: %v", err)
+	}
+	if !fresh {
+		t.Fatal("взятая пустая сессия должна быть «свежей» (в неё не писали)")
 	}
 	if id != "sess_empty" {
 		t.Fatalf("id = %q, want sess_empty", id)
@@ -70,9 +77,12 @@ func TestNoEmptySessionCreatesNew(t *testing.T) {
 	fb.msgCount["sess_used"] = 5
 	b := newTestBot(t, ft, fb)
 
-	id, err := b.sessionIDFor(context.Background())
+	id, fresh, err := b.sessionIDFor(context.Background())
 	if err != nil {
 		t.Fatalf("sessionIDFor: %v", err)
+	}
+	if !fresh {
+		t.Fatal("только что созданная сессия должна быть «свежей»")
 	}
 	if id != testSessID {
 		t.Fatalf("id = %q, want %q", id, testSessID)
@@ -88,12 +98,16 @@ func TestSessionIDCached(t *testing.T) {
 	fb := newFakeBackend(t)
 	b := newTestBot(t, ft, fb)
 
-	if _, err := b.sessionIDFor(context.Background()); err != nil {
+	if _, fresh, err := b.sessionIDFor(context.Background()); err != nil {
 		t.Fatalf("sessionIDFor: %v", err)
+	} else if !fresh {
+		t.Fatal("первая сессия должна быть «свежей»")
 	}
 	fb.sessions = nil // сломали бы список, если бы снова искали
-	if _, err := b.sessionIDFor(context.Background()); err != nil {
+	if _, fresh, err := b.sessionIDFor(context.Background()); err != nil {
 		t.Fatalf("повторный sessionIDFor: %v", err)
+	} else if fresh {
+		t.Fatal("закэшированная сессия не должна считаться «свежей»")
 	}
 	if n := fb.createdSessions(); n != 1 {
 		t.Fatalf("создано сессий %d, want 1", n)
@@ -303,5 +317,145 @@ func TestResetNoSessionCreates(t *testing.T) {
 	}
 	if got := fb.deletedSessions(); len(got) != 0 {
 		t.Fatalf("удалено лишнее: %v", got)
+	}
+}
+
+// ── Названия сессий и восстановление истории ────────────────────────────────
+
+// TestCmdSessionsShowsTitlesFromHistory — сессии с заглушкой «telegram-bot»
+// подписываются первым сообщением пользователя: и в строке списка, и в кнопке
+// переключения, иначе все сессии неотличимы друг от друга.
+func TestCmdSessionsShowsTitlesFromHistory(t *testing.T) {
+	ft := newFakeTelegram(t)
+	fb := newFakeBackend(t)
+	now := time.Now()
+	fb.sessions = []backend.Session{
+		{ID: "sess1", Title: "Бэкенд", Directory: "/workspace", CreatedAt: now},
+		{ID: "sess2", Title: "telegram-bot", Directory: "/workspace", CreatedAt: now.Add(time.Hour)},
+	}
+	fb.hist["sess2"] = []backend.StoredMessage{
+		{ID: "u1", Role: "user", Status: "pending",
+			Parts: json.RawMessage(`[{"type":"text","text":"Почини баг в CI"}]`), CreatedAt: now},
+		{ID: "a1", Role: "assistant", Status: "completed",
+			Parts: json.RawMessage(`[{"type":"text","text":"Готово"}]`), CreatedAt: now},
+	}
+	b := newTestBot(t, ft, fb)
+	b.mu.Lock()
+	b.sessionID = "sess1"
+	b.mu.Unlock()
+
+	b.handleUpdate(textUpdate("/sessions"))
+
+	texts := ft.waitText(t, "Сессии")
+	joined := strings.Join(texts, "\n")
+	if !strings.Contains(joined, "Почини баг в CI") {
+		t.Fatalf("в списке нет названия из истории: %q", joined)
+	}
+	if !strings.Contains(joined, "Бэкенд") {
+		t.Fatalf("потерялось своё название сессии: %q", joined)
+	}
+	if strings.Contains(joined, "<code>telegram-bot</code>") {
+		t.Fatalf("заглушка не должна показываться: %q", joined)
+	}
+	var buttons string
+	for _, text := range ft.buttonTexts() {
+		buttons += text + "\n"
+	}
+	if !strings.Contains(buttons, "Почини баг в CI") {
+		t.Fatalf("кнопка подписана не названием сессии: %q", buttons)
+	}
+}
+
+// TestSwitchSessionRestoresHistory — после переключения в чат восстанавливается
+// история диалога: и реплики пользователя, и ответы агента.
+func TestSwitchSessionRestoresHistory(t *testing.T) {
+	ft := newFakeTelegram(t)
+	fb := newFakeBackend(t)
+	now := time.Now()
+	fb.sessions = twoSessions(now)
+	fb.hist["sess2"] = []backend.StoredMessage{
+		{ID: "u1", Role: "user", Status: "pending",
+			Parts: json.RawMessage(`[{"type":"text","text":"сделай фичу"}]`), CreatedAt: now},
+		{ID: "a1", Role: "assistant", Status: "completed",
+			Parts: json.RawMessage(`[{"type":"text","text":"Фича **готова**"}]`), CreatedAt: now.Add(time.Minute)},
+	}
+	b := newTestBot(t, ft, fb)
+	b.mu.Lock()
+	b.sessionID = "sess1"
+	b.mu.Unlock()
+
+	b.handleCallback(&telego.CallbackQuery{
+		ID:      "c1",
+		Data:    "sess:switch:sess2",
+		From:    telego.User{ID: testRootID},
+		Message: &telego.Message{MessageID: 2, Chat: telego.Chat{ID: testChatID, Type: "private"}},
+	})
+
+	texts := ft.waitText(t, "Фича <b>готова</b>")
+	joined := strings.Join(texts, "\n")
+	if !strings.Contains(joined, "История сессии") {
+		t.Fatalf("нет заголовка истории: %q", joined)
+	}
+	if !strings.Contains(joined, "сделай фичу") {
+		t.Fatalf("в истории нет сообщения пользователя: %q", joined)
+	}
+	if !strings.Contains(joined, "2 сообщения") {
+		t.Fatalf("не посчитаны сообщения истории: %q", joined)
+	}
+}
+
+// TestSwitchSessionWithEmptyHistory — переключение на сессию без сообщений
+// честно сообщает, что восстанавливать нечего.
+func TestSwitchSessionWithEmptyHistory(t *testing.T) {
+	ft := newFakeTelegram(t)
+	fb := newFakeBackend(t)
+	fb.sessions = twoSessions(time.Now())
+	b := newTestBot(t, ft, fb)
+	b.mu.Lock()
+	b.sessionID = "sess1"
+	b.mu.Unlock()
+
+	b.handleCallback(&telego.CallbackQuery{
+		ID:      "c1",
+		Data:    "sess:switch:sess2",
+		From:    telego.User{ID: testRootID},
+		Message: &telego.Message{MessageID: 2, Chat: telego.Chat{ID: testChatID, Type: "private"}},
+	})
+
+	ft.waitText(t, "ещё нет сообщений")
+}
+
+// TestFirstMessageAutoTitlesSession — первое сообщение задаёт название свежей
+// сессии, чтобы в списках не висела заглушка «telegram-bot».
+func TestFirstMessageAutoTitlesSession(t *testing.T) {
+	ft := newFakeTelegram(t)
+	fb := newFakeBackend(t)
+	b := newTestBot(t, ft, fb)
+
+	b.handleUpdate(textUpdate("Почини баг в CI"))
+
+	waitFor(t, func() bool { return fb.receivedMessages() == 1 })
+	if got := fb.renamedSession(testSessID); got != "Почини баг в CI" {
+		t.Fatalf("название сессии = %q, хотим по первому сообщению", got)
+	}
+}
+
+// TestSecondMessageDoesNotRenameSession — автоназвание ставится только один
+// раз: повторные сообщения не переписывают название (и его можно менять через
+// /rename).
+func TestSecondMessageDoesNotRenameSession(t *testing.T) {
+	ft := newFakeTelegram(t)
+	fb := newFakeBackend(t)
+	b := newTestBot(t, ft, fb)
+
+	b.handleUpdate(textUpdate("Почини баг в CI"))
+	waitFor(t, func() bool { return fb.renamedSession(testSessID) != "" })
+	if _, _, err := b.sessionIDFor(context.Background()); err != nil {
+		t.Fatalf("sessionIDFor: %v", err)
+	}
+	b.handleUpdate(textUpdate("другое сообщение"))
+
+	if got := fb.renamedSession(testSessID); got != "Почини баг в CI" {
+		t.Fatalf("название перезаписано повторным сообщением: %q", got)
 	}
 }

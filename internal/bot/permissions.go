@@ -61,11 +61,11 @@ func (b *Bot) askPermission(p backend.PermissionAsked) {
 	desc := escapeHTML(p.Permission)
 	switch {
 	case len(p.Patterns) > 0:
-		desc = fmt.Sprintf("%s: <code>%s</code>", escapeHTML(p.Permission), escapeHTML(strings.Join(p.Patterns, ", ")))
+		desc += ": " + htmlCode(strings.Join(p.Patterns, ", "))
 	case p.Pattern != "":
-		desc = fmt.Sprintf("%s: <code>%s</code>", escapeHTML(p.Permission), escapeHTML(p.Pattern))
+		desc += ": " + htmlCode(p.Pattern)
 	case p.Metadata.Filepath != "":
-		desc = fmt.Sprintf("%s: <code>%s</code>", escapeHTML(p.Permission), escapeHTML(p.Metadata.Filepath))
+		desc += ": " + htmlCode(p.Metadata.Filepath)
 	}
 	text := fmt.Sprintf("🔐 <b>Запрос разрешения</b>\n\n<blockquote>%s</blockquote>", desc)
 	if _, err := b.api.SendMessage(context.Background(),

@@ -64,7 +64,8 @@ func (b *Bot) cmdHelp(msg *telego.Message) {
 /reset — начать новую сессию opencode
 /new — новая сессия, не удаляя прежнюю (как в OpenCode)
 /session — информация о текущей сессии
-/sessions — список сессий и переключение (фоновая откроется с живым прогрессом)
+/sessions — список сессий с названиями и переключение; после переключения
+           в чат восстанавливается история диалога (фоновая — с живым прогрессом)
 /rename <i>[название]</i> — переименовать текущую сессию
 /abort — прервать текущий запрос
 /detach — оставить текущую сессию работать в фоне
@@ -110,7 +111,7 @@ func (b *Bot) cmdNew(msg *telego.Message) {
 		b.send(msg.Chat.ID, "Не удалось создать сессию: "+err.Error())
 		return
 	}
-	b.sendHTML(msg.Chat.ID, "Новая сессия создана: <code>"+escapeHTML(id)+"</code>", nil)
+	b.sendHTML(msg.Chat.ID, "Новая сессия создана: "+htmlCode(id), nil)
 }
 
 func (b *Bot) cmdOpenCodeCommands(msg *telego.Message) {
@@ -168,7 +169,7 @@ func (b *Bot) cmdReset(msg *telego.Message) {
 		if err == nil && empty {
 			b.clearQueuedText()
 			b.sendHTML(msg.Chat.ID,
-				fmt.Sprintf("Сессия <code>%s</code> пустая — новая не создана.", escapeHTML(old)), nil)
+				fmt.Sprintf("Сессия %s пустая — новая не создана.", htmlCode(old)), nil)
 			return
 		}
 	}
@@ -185,7 +186,7 @@ func (b *Bot) cmdReset(msg *telego.Message) {
 		_ = b.backend.DeleteSession(ctx, old)
 	}
 	b.clearQueuedText()
-	b.sendHTML(msg.Chat.ID, fmt.Sprintf("Новая сессия создана: <code>%s</code>", escapeHTML(id)), nil)
+	b.sendHTML(msg.Chat.ID, "Новая сессия создана: "+htmlCode(id), nil)
 }
 
 func (b *Bot) cmdSession(msg *telego.Message) {
@@ -202,27 +203,21 @@ func (b *Bot) cmdSession(msg *telego.Message) {
 	}
 
 	b.mu.Lock()
-	model := "<i>(по умолчанию)</i>"
+	model := htmlItalic("(по умолчанию)")
 	if b.model != nil {
-		model = b.model.ProviderID + "/" + b.model.ModelID
+		model = escapeHTML(b.model.ProviderID + "/" + b.model.ModelID)
 	}
 	agent := b.agent
 	b.mu.Unlock()
 
-	text := fmt.Sprintf(
-		"<b>Сессия</b>\n\n"+
-			"🆔 <code>%s</code>\n"+
-			"📁 <code>%s</code>\n"+
-			"🤖 <b>Агент:</b> %s\n"+
-			"⚙️ <b>Модель:</b> %s\n"+
-			"🕐 <b>Создана:</b> %s\n\n"+
-			"Переключиться между сессиями — /sessions, переименовать — /rename",
-		escapeHTML(s.ID),
-		escapeHTML(s.Directory),
-		escapeHTML(agent),
-		model,
-		s.CreatedAt.Format(time.RFC1123),
-	)
+	text := "<b>Сессия</b>\n\n" +
+		"📝 <b>Название:</b> " + escapeHTML(b.displayTitle(context.Background(), s)) + "\n" +
+		"🆔 " + htmlCode(s.ID) + "\n" +
+		"📁 " + htmlCode(s.Directory) + "\n" +
+		"🤖 <b>Агент:</b> " + escapeHTML(agent) + "\n" +
+		"⚙️ <b>Модель:</b> " + model + "\n" +
+		"🕐 <b>Создана:</b> " + escapeHTML(s.CreatedAt.Format(time.RFC1123)) + "\n\n" +
+		"Переключиться между сессиями — /sessions, переименовать — /rename"
 	b.sendHTML(msg.Chat.ID, text, nil)
 }
 
@@ -265,10 +260,7 @@ func (b *Bot) cmdDetach(msg *telego.Message) {
 		return
 	}
 
-	title := sessionID
-	if sess, err := b.backend.GetSession(context.Background(), sessionID); err == nil && strings.TrimSpace(sess.Title) != "" {
-		title = sess.Title
-	}
+	title := b.sessionTitle(context.Background(), sessionID)
 
 	detached := false
 	st.finalizeOnce.Do(func() {
@@ -301,7 +293,7 @@ func (b *Bot) cmdDetach(msg *telego.Message) {
 		b.send(msg.Chat.ID, "Запрос уже завершился; открой /sessions для выбора сессии.")
 		return
 	}
-	b.sendHTML(msg.Chat.ID, "📎 Открепил сессию <b>"+escapeHTML(title)+"</b>. "+
+	b.sendHTML(msg.Chat.ID, "📎 Открепил сессию "+htmlBold(title)+". "+
 		"Открой /sessions, чтобы выбрать другую; о завершении фоновой задачи сообщу отдельно.", nil)
 }
 
@@ -316,7 +308,8 @@ func (b *Bot) cmdQueue(msg *telego.Message) {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "<b>Очередь сообщений</b> · %d/%d\n", len(items), maxQueuedTextMessages)
 	for i, item := range items {
-		fmt.Fprintf(&sb, "\n%d. <blockquote>%s</blockquote>", i+1, escapeHTML(shortLine(strings.Join(strings.Fields(item.text), " "), 240)))
+		line := shortLine(strings.Join(strings.Fields(item.text), " "), 240)
+		fmt.Fprintf(&sb, "\n%d. %s", i+1, htmlBlockquote(line))
 	}
 	b.sendHTML(msg.Chat.ID, sb.String(), nil)
 }
@@ -345,7 +338,7 @@ func (b *Bot) cmdModel(msg *telego.Message) {
 	b.mu.Lock()
 	b.model = &backend.ModelRef{ProviderID: parts[0], ModelID: parts[1]}
 	b.mu.Unlock()
-	b.sendHTML(msg.Chat.ID, "✅ Модель: <code>"+escapeHTML(args)+"</code>", nil)
+	b.sendHTML(msg.Chat.ID, "✅ Модель: "+htmlCode(args), nil)
 }
 
 func (b *Bot) cmdAgent(msg *telego.Message) {
@@ -362,7 +355,7 @@ func (b *Bot) cmdAgent(msg *telego.Message) {
 	b.mu.Lock()
 	b.agent = args
 	b.mu.Unlock()
-	b.sendHTML(msg.Chat.ID, "✅ Агент: <code>"+escapeHTML(args)+"</code>", nil)
+	b.sendHTML(msg.Chat.ID, "✅ Агент: "+htmlCode(args), nil)
 }
 
 // ── Formatting ───────────────────────────────────────────────────────────────

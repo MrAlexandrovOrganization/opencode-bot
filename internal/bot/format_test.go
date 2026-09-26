@@ -286,3 +286,20 @@ func TestFormatCost(t *testing.T) {
 		}
 	}
 }
+
+// TestHTMLHelpersEscape — обёртки форматирования всегда экранируют текст:
+// в них нельзя получить сломанный или подделанный HTML.
+func TestHTMLHelpersEscape(t *testing.T) {
+	for _, tc := range []struct {
+		got, want string
+	}{
+		{htmlBold("а<b"), "<b>а&lt;b</b>"},
+		{htmlItalic("x&y"), "<i>x&amp;y</i>"},
+		{htmlCode("</code>"), "<code>&lt;/code&gt;</code>"},
+		{htmlBlockquote("<script>"), "<blockquote>&lt;script&gt;</blockquote>"},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("got %q, want %q", tc.got, tc.want)
+		}
+	}
+}

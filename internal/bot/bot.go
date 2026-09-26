@@ -178,18 +178,24 @@ func New(api *telego.Bot, backendClient *backend.Client, whisperClient *whisper.
 // ── Session management ───────────────────────────────────────────────────────
 
 // sessionIDFor returns the current opencode session, reusing an existing empty
-// session (после рестарта бота) or creating a new one lazily.
-func (b *Bot) sessionIDFor(ctx context.Context) (string, error) {
+// session (после рестарта бота) or creating a new one lazily. Второй результат
+// — «свежесть»: true, если сессия только что создана или взята пустой, то есть
+// в неё ещё не отправляли сообщений и её можно назвать по первому запросу.
+func (b *Bot) sessionIDFor(ctx context.Context) (string, bool, error) {
 	b.mu.Lock()
 	id := b.sessionID
 	b.mu.Unlock()
 	if id != "" {
-		return id, nil
+		return id, false, nil
 	}
 	if id, ok := b.reuseEmptySession(ctx); ok {
-		return id, nil
+		return id, true, nil
 	}
-	return b.newSession(ctx)
+	id, err := b.newSession(ctx)
+	if err != nil {
+		return "", false, err
+	}
+	return id, true, nil
 }
 
 // reuseEmptySession переиспользует существующую пустую сессию (без сообщений),
@@ -641,7 +647,7 @@ func (b *Bot) finishBackgroundStream(sessionID, topLevelSessionID string, info b
 	st.mu.Unlock()
 	if errText := info.MessageError(); errText != "" {
 		b.editMessageHTML(context.Background(), chatID, messageID,
-			"❌ Фоновая сессия <b>"+escapeHTML(title)+"</b> завершилась с ошибкой: "+escapeHTML(errText))
+			"❌ Фоновая сессия "+htmlBold(title)+" завершилась с ошибкой: "+escapeHTML(errText))
 		return true
 	}
 	text := ""
@@ -650,7 +656,7 @@ func (b *Bot) finishBackgroundStream(sessionID, topLevelSessionID string, info b
 			text = msg.Text()
 		}
 	}
-	final := "✅ Фоновая сессия <b>" + escapeHTML(title) + "</b> завершилась."
+	final := "✅ Фоновая сессия " + htmlBold(title) + " завершилась."
 	if text = strings.TrimSpace(text); text != "" {
 		final += "\n\n" + escapeHTML(shortLine(text, 1500))
 	}
@@ -666,7 +672,7 @@ func backgroundProgressHTML(title, preview string) string {
 	if text == "" {
 		text = "💭 Выполняется…"
 	}
-	return "📎 Фоновая сессия <b>" + escapeHTML(title) + "</b>\n" + escapeHTML(shortLine(text, 1500))
+	return "📎 Фоновая сессия " + htmlBold(title) + "\n" + escapeHTML(shortLine(text, 1500))
 }
 
 // backgroundPreview возвращает текущий превью-текст фонового окна.
@@ -743,13 +749,10 @@ func (b *Bot) notifyBackgroundCompletion(sessionID, topLevelSessionID string, in
 	if topLevelSessionID == "" || sessionID == "" || info.Role != "assistant" {
 		return
 	}
-	title := sessionID
-	if sess, err := b.backend.GetSession(context.Background(), sessionID); err == nil && strings.TrimSpace(sess.Title) != "" {
-		title = sess.Title
-	}
-	text := "✅ Фоновая сессия <b>" + escapeHTML(title) + "</b> завершилась."
+	title := b.sessionTitle(context.Background(), sessionID)
+	text := "✅ Фоновая сессия " + htmlBold(title) + " завершилась."
 	if errText := info.MessageError(); errText != "" {
-		text = "❌ Фоновая сессия <b>" + escapeHTML(title) + "</b> завершилась с ошибкой: " + escapeHTML(errText)
+		text = "❌ Фоновая сессия " + htmlBold(title) + " завершилась с ошибкой: " + escapeHTML(errText)
 	}
 	b.mu.Lock()
 	chatID := b.chatID
@@ -857,12 +860,15 @@ func (b *Bot) startRequest(ctx context.Context, chatID int64, req backend.Messag
 	// на который ждёт finishStream в путях ошибок (CreateSession/SendMessage).
 	go b.previewLoop(st, chatID)
 
-	sessionID, err := b.sessionIDFor(ctx)
+	sessionID, fresh, err := b.sessionIDFor(ctx)
 	if err != nil {
 		b.finishStream(st, backend.Message{}, "❌ "+err.Error())
 		return
 	}
 	st.sessionID = sessionID
+	if fresh {
+		b.ensureSessionTitle(ctx, sessionID, sessionTitleFromRequest(req))
+	}
 
 	if _, err := b.backend.SendMessage(ctx, sessionID, req); err != nil {
 		b.finishStream(st, backend.Message{}, "❌ "+err.Error())
@@ -890,12 +896,15 @@ func (b *Bot) startCommandRequest(ctx context.Context, chatID int64, command, ar
 	st.stopped = make(chan struct{})
 	go b.previewLoop(st, chatID)
 
-	sessionID, err := b.sessionIDFor(ctx)
+	sessionID, fresh, err := b.sessionIDFor(ctx)
 	if err != nil {
 		b.finishStream(st, backend.Message{}, "❌ "+err.Error())
 		return
 	}
 	st.sessionID = sessionID
+	if fresh {
+		b.ensureSessionTitle(ctx, sessionID, titleFromText("/"+command+" "+arguments))
+	}
 	if _, err := b.backend.RunCommand(ctx, sessionID, command, arguments); err != nil {
 		b.finishStream(st, backend.Message{}, "❌ "+err.Error())
 		return
@@ -1339,10 +1348,10 @@ func splitActivityChunks(toolLog, reasoning []string) []string {
 	}
 
 	for _, line := range lines {
-		wrapped := "<i>" + escapeHTML(line) + "</i>"
+		wrapped := htmlItalic(line)
 		if len([]rune(wrapped)) > maxMessageLen {
 			for _, piece := range splitRunes(line, maxMessageLen-7) {
-				add("<i>" + escapeHTML(piece) + "</i>")
+				add(htmlItalic(piece))
 			}
 			continue
 		}
@@ -1635,8 +1644,8 @@ func formatFooter(info backend.Message) string {
 	if info.Cost == 0 && info.Tokens.Input == 0 && info.Tokens.Output == 0 {
 		return ""
 	}
-	return fmt.Sprintf("\n\n<i>💸 %s · ⤴ %d · ⤵ %d</i>",
-		formatCost(info.Cost), info.Tokens.Input, info.Tokens.Output)
+	return "\n\n" + htmlItalic(fmt.Sprintf("💸 %s · ⤴ %d · ⤵ %d",
+		formatCost(info.Cost), info.Tokens.Input, info.Tokens.Output))
 }
 
 func formatCost(c float64) string {
