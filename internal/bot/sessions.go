@@ -164,13 +164,12 @@ func (b *Bot) handleSessionSwitch(query *telego.CallbackQuery) {
 		return
 	}
 
-	// Переключаемся только при busy=false, поэтому транзиентного состояния
-	// (стрим, вопрос, разрешение) быть не должно — сбрасываем на всякий случай.
+	// У каждой сессии свой pending-вопрос: при переключении восстанавливаем
+	// именно её состояние, не ломая фоновые сессии.
 	b.mu.Lock()
 	b.sessionID = sessionID
 	b.userMsgID = ""
-	b.perms = map[string]*permAsk{}
-	b.pendingQ = nil
+	b.pendingQ = b.pendingQs[sessionID]
 	b.mu.Unlock()
 	slog.Info("session switched", "id", sessionID)
 

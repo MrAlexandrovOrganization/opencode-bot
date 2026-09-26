@@ -17,6 +17,7 @@ import (
 // for the user to answer. Questions are presented one at a time; answers
 // are accumulated in order and submitted to the server once all are known.
 type pendingQuestions struct {
+	sessionID string
 	requestID string
 	questions []backend.Question
 	answers   [][]string
@@ -32,27 +33,29 @@ func (b *Bot) onQuestionAsked(ev backend.Event) {
 		slog.Warn("parse question", "error", err)
 		return
 	}
-	if q.ID == "" || q.SessionID != b.currentSessionID() || len(q.Questions) == 0 {
+	if q.ID == "" || q.SessionID == "" || len(q.Questions) == 0 {
 		return
 	}
 
 	b.mu.Lock()
-	b.pendingQ = &pendingQuestions{
+	p := &pendingQuestions{
+		sessionID: q.SessionID,
 		requestID: q.ID,
 		questions: q.Questions,
 		answers:   make([][]string, len(q.Questions)),
 	}
+	b.pendingQs[q.SessionID] = p
+	if q.SessionID == b.sessionID {
+		b.pendingQ = p
+	}
 	b.mu.Unlock()
 
-	b.askCurrentQuestion()
+	b.askCurrentQuestion(p)
 }
 
 // askCurrentQuestion sends the current pending question to Telegram with its
 // options as inline buttons.
-func (b *Bot) askCurrentQuestion() {
-	b.mu.Lock()
-	p := b.pendingQ
-	b.mu.Unlock()
+func (b *Bot) askCurrentQuestion(p *pendingQuestions) {
 	if p == nil || p.idx >= len(p.questions) {
 		return
 	}
@@ -99,6 +102,9 @@ func (b *Bot) askCurrentQuestion() {
 		// Не бросаем пользователя в молчании: вопрос не показался, снимаем
 		// его из pending — иначе следующий текст будет съеден как «ответ».
 		b.mu.Lock()
+		if b.pendingQs[p.sessionID] == p {
+			delete(b.pendingQs, p.sessionID)
+		}
 		if b.pendingQ == p {
 			b.pendingQ = nil
 		}
@@ -107,7 +113,7 @@ func (b *Bot) askCurrentQuestion() {
 		return
 	}
 	b.mu.Lock()
-	if b.pendingQ == p {
+	if b.pendingQs[p.sessionID] == p {
 		p.chatID = chatID
 		p.msgID = msg.MessageID
 	}
@@ -116,10 +122,9 @@ func (b *Bot) askCurrentQuestion() {
 
 // answerCurrent records the answer for question qidx (must be the current
 // one) and, once all questions are answered, submits the reply to the server.
-func (b *Bot) answerCurrent(qidx int, label string) {
+func (b *Bot) answerCurrent(p *pendingQuestions, qidx int, label string) {
 	b.mu.Lock()
-	p := b.pendingQ
-	if p == nil || p.idx != qidx || qidx >= len(p.questions) {
+	if p == nil || b.pendingQs[p.sessionID] != p || p.idx != qidx || qidx >= len(p.questions) {
 		b.mu.Unlock()
 		return
 	}
@@ -135,7 +140,7 @@ func (b *Bot) answerCurrent(qidx int, label string) {
 	if done {
 		b.submitQuestionReply(p)
 	} else {
-		b.askCurrentQuestion()
+		b.askCurrentQuestion(p)
 	}
 }
 
@@ -144,6 +149,9 @@ func (b *Bot) answerCurrent(qidx int, label string) {
 func (b *Bot) submitQuestionReply(p *pendingQuestions) {
 	err := b.backend.ReplyQuestion(context.Background(), p.requestID, p.answers)
 	b.mu.Lock()
+	if b.pendingQs[p.sessionID] == p {
+		delete(b.pendingQs, p.sessionID)
+	}
 	if b.pendingQ == p {
 		b.pendingQ = nil
 	}
@@ -171,7 +179,13 @@ func (b *Bot) handleQuestionAnswer(query *telego.CallbackQuery) {
 	}
 
 	b.mu.Lock()
-	p := b.pendingQ
+	var p *pendingQuestions
+	for _, candidate := range b.pendingQs {
+		if candidate.requestID == requestID {
+			p = candidate
+			break
+		}
+	}
 	b.mu.Unlock()
 
 	// Кнопка относится к старому вопросу (другой requestID) или уже
@@ -202,7 +216,7 @@ func (b *Bot) handleQuestionAnswer(query *telego.CallbackQuery) {
 		CallbackQueryID: query.ID,
 		Text:            "✅ " + label,
 	})
-	b.answerCurrent(qidx, label)
+	b.answerCurrent(p, qidx, label)
 }
 
 // answerQuestionText consumes a plain-text message as the answer to the
@@ -218,6 +232,6 @@ func (b *Bot) answerQuestionText(msg *telego.Message) bool {
 	if p == nil {
 		return false
 	}
-	b.answerCurrent(qidx, msg.Text)
+	b.answerCurrent(p, qidx, msg.Text)
 	return true
 }

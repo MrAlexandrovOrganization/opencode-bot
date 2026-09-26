@@ -50,10 +50,11 @@ type Bot struct {
 	stream    *Stream
 	model     *backend.ModelRef
 	agent     string
-	userMsgID string              // messageID user-эха текущего запроса (части игнорируются)
-	perms     map[string]*permAsk // permissionID -> pending "ask" prompt
-	pendingQ  *pendingQuestions   // question the agent is awaiting an answer to
-	queued    []queuedText        // текстовые запросы, пришедшие во время выполнения
+	userMsgID string                       // messageID user-эха текущего запроса (части игнорируются)
+	perms     map[string]*permAsk          // permissionID -> pending "ask" prompt
+	pendingQ  *pendingQuestions            // вопрос выбранной сессии (для текстового ответа)
+	pendingQs map[string]*pendingQuestions // sessionID -> question, включая фоновые сессии
+	queued    []queuedText                 // текстовые запросы, пришедшие во время выполнения
 	// background хранит компактные живые представления откреплённых сессий.
 	// Они не занимают foreground-стрим и потому могут обновляться параллельно.
 	background map[string]*backgroundStream
@@ -81,6 +82,7 @@ type queuedText struct {
 // update the Telegram placeholder with live partial text or the current
 // agent activity (tool calls / reasoning).
 type Stream struct {
+	sessionID    string
 	chatID       int64
 	messageID    int
 	mu           sync.Mutex
@@ -147,7 +149,8 @@ type toolPartState struct {
 
 // permAsk is a pending permission prompt sent to Telegram.
 type permAsk struct {
-	created time.Time
+	created   time.Time
+	sessionID string
 }
 
 // New creates a new Bot.
@@ -160,6 +163,7 @@ func New(api *telego.Bot, backendClient *backend.Client, whisperClient *whisper.
 		httpClient: &http.Client{Timeout: 2 * time.Minute},
 		agent:      cfg.DefaultAgent,
 		perms:      make(map[string]*permAsk),
+		pendingQs:  make(map[string]*pendingQuestions),
 		background: make(map[string]*backgroundStream),
 	}
 }
@@ -724,6 +728,7 @@ func (b *Bot) startRequest(ctx context.Context, chatID int64, req backend.Messag
 		b.finishStream(st, backend.Message{}, "❌ "+err.Error())
 		return
 	}
+	st.sessionID = sessionID
 
 	if _, err := b.backend.SendMessage(ctx, sessionID, req); err != nil {
 		b.finishStream(st, backend.Message{}, "❌ "+err.Error())
@@ -756,6 +761,7 @@ func (b *Bot) startCommandRequest(ctx context.Context, chatID int64, command, ar
 		b.finishStream(st, backend.Message{}, "❌ "+err.Error())
 		return
 	}
+	st.sessionID = sessionID
 	if _, err := b.backend.RunCommand(ctx, sessionID, command, arguments); err != nil {
 		b.finishStream(st, backend.Message{}, "❌ "+err.Error())
 		return
@@ -834,8 +840,15 @@ func (b *Bot) finishCommon(st *Stream) {
 	// и запросы разрешений устарели, чтобы не съедать следующее
 	// сообщение пользователя как «ответ» на мёртвый вопрос.
 	b.mu.Lock()
-	b.pendingQ = nil
-	b.perms = make(map[string]*permAsk)
+	if b.pendingQ != nil && b.pendingQ.sessionID == st.sessionID {
+		b.pendingQ = nil
+	}
+	delete(b.pendingQs, st.sessionID)
+	for id, permission := range b.perms {
+		if permission.sessionID == st.sessionID {
+			delete(b.perms, id)
+		}
+	}
 	b.mu.Unlock()
 }
 

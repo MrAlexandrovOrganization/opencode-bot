@@ -20,7 +20,7 @@ func (b *Bot) onPermissionAsked(ev backend.Event) {
 		slog.Warn("parse permission", "error", err)
 		return
 	}
-	if p.ID == "" || p.SessionID != b.currentSessionID() {
+	if p.ID == "" || p.SessionID == "" {
 		return
 	}
 
@@ -41,7 +41,7 @@ func (b *Bot) askPermission(p backend.PermissionAsked) {
 		b.mu.Unlock()
 		return
 	}
-	b.perms[p.ID] = &permAsk{created: time.Now()}
+	b.perms[p.ID] = &permAsk{created: time.Now(), sessionID: p.SessionID}
 	chatID := b.chatID
 	b.mu.Unlock()
 
@@ -103,7 +103,7 @@ func (b *Bot) handleCallback(query *telego.CallbackQuery) {
 	}
 
 	b.mu.Lock()
-	_, ok := b.perms[permissionID]
+	permission, ok := b.perms[permissionID]
 	b.mu.Unlock()
 	if !ok {
 		_ = b.api.AnswerCallbackQuery(context.Background(), &telego.AnswerCallbackQueryParams{
@@ -119,7 +119,7 @@ func (b *Bot) handleCallback(query *telego.CallbackQuery) {
 		"reject": "❌ Отклонено",
 	}[response]
 
-	err := b.backend.ReplyPermission(context.Background(), b.currentSessionID(), permissionID, response)
+	err := b.backend.ReplyPermission(context.Background(), permission.sessionID, permissionID, response)
 	if err != nil {
 		slog.Error("reply permission", "error", err)
 		label = "❌ Ошибка: " + err.Error()

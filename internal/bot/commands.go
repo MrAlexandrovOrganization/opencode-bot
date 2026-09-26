@@ -289,8 +289,6 @@ func (b *Bot) cmdDetach(msg *telego.Message) {
 		b.mu.Lock()
 		b.sessionID = ""
 		b.userMsgID = ""
-		b.pendingQ = nil
-		b.perms = make(map[string]*permAsk)
 		b.mu.Unlock()
 		b.editMessageHTML(context.Background(), st.chatID, st.messageID,
 			"📎 Сессия <b>"+escapeHTML(title)+"</b> продолжает работу в фоне.")

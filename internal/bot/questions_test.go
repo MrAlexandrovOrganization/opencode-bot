@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"encoding/json"
 	"testing"
 
 	"opencode-bot/internal/backend"
@@ -10,11 +11,39 @@ import (
 
 func newPendingQ() *pendingQuestions {
 	return &pendingQuestions{
+		sessionID: "sess1",
 		requestID: "que_test01",
 		questions: []backend.Question{
 			{Question: "Что сделать?", Header: "Выбор", Options: []backend.QuestionOption{{Label: "да"}, {Label: "нет"}}},
 		},
 		answers: make([][]string, 1),
+	}
+}
+
+func TestBackgroundQuestionIsKeptBySession(t *testing.T) {
+	ft := newFakeTelegram(t)
+	fb := newFakeBackend(t)
+	b := newTestBot(t, ft, fb)
+	b.mu.Lock()
+	b.chatID = testChatID
+	b.sessionID = "foreground"
+	b.mu.Unlock()
+
+	b.onQuestionAsked(backend.Event{Properties: json.RawMessage(`{
+        "id":"question-background","sessionID":"background",
+        "questions":[{"question":"Продолжить?","options":[{"label":"да"}]}]
+    }`)})
+
+	ft.waitText(t, "Продолжить?")
+	b.mu.Lock()
+	p := b.pendingQs["background"]
+	foreground := b.pendingQ
+	b.mu.Unlock()
+	if p == nil || p.requestID != "question-background" {
+		t.Fatalf("фоновый вопрос не сохранён: %+v", p)
+	}
+	if foreground != nil {
+		t.Fatalf("фоновый вопрос стал вопросом выбранной сессии: %+v", foreground)
 	}
 }
 
@@ -29,6 +58,7 @@ func TestQuestionAnswerValidOption(t *testing.T) {
 	b := newTestBot(t, ft, fb)
 	b.mu.Lock()
 	b.pendingQ = newPendingQ()
+	b.pendingQs[b.pendingQ.sessionID] = b.pendingQ
 	b.mu.Unlock()
 
 	b.handleQuestionAnswer(callback("qans:que_test01:0:1"))
@@ -53,6 +83,7 @@ func TestQuestionAnswerStaleRequest(t *testing.T) {
 	b := newTestBot(t, ft, fb)
 	b.mu.Lock()
 	b.pendingQ = newPendingQ()
+	b.pendingQs[b.pendingQ.sessionID] = b.pendingQ
 	b.mu.Unlock()
 
 	b.handleQuestionAnswer(callback("qans:que_other00:0:0"))
@@ -72,6 +103,7 @@ func TestQuestionAnswerCustom(t *testing.T) {
 	b := newTestBot(t, ft, fb)
 	b.mu.Lock()
 	b.pendingQ = newPendingQ()
+	b.pendingQs[b.pendingQ.sessionID] = b.pendingQ
 	b.mu.Unlock()
 
 	b.handleQuestionAnswer(callback("qans:que_test01:0:-1"))
@@ -91,6 +123,7 @@ func TestQuestionAnswerOutOfRange(t *testing.T) {
 	b := newTestBot(t, ft, fb)
 	b.mu.Lock()
 	b.pendingQ = newPendingQ()
+	b.pendingQs[b.pendingQ.sessionID] = b.pendingQ
 	b.mu.Unlock()
 
 	b.handleQuestionAnswer(callback("qans:que_test01:0:99"))
