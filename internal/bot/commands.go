@@ -126,9 +126,11 @@ func (b *Bot) cmdOpenCodeCommands(msg *telego.Message) {
 	var out strings.Builder
 	out.WriteString("<b>Команды OpenCode</b>")
 	for _, command := range commands {
-		out.WriteString("\n/" + escapeHTML(command.Name))
+		out.WriteString("\n/")
+		out.WriteString(escapeHTML(command.Name))
 		if desc := strings.TrimSpace(command.Description); desc != "" {
-			out.WriteString(" — " + escapeHTML(shortLine(desc, 180)))
+			out.WriteString(" — ")
+			out.WriteString(escapeHTML(shortLine(desc, 180)))
 		}
 	}
 	b.sendHTML(msg.Chat.ID, out.String(), nil)

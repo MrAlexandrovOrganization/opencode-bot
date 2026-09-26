@@ -72,9 +72,12 @@ func (b *Bot) cmdSessions(msg *telego.Message) {
 			line += " · " + escapeHTML(shortLine(status, 48))
 		}
 		if s.ID == current {
-			sb.WriteString("✅ " + line + " <b>(активна)</b>\n")
+			sb.WriteString("✅ ")
+			sb.WriteString(line)
+			sb.WriteString(" <b>(активна)</b>\n")
 		} else {
-			sb.WriteString(line + "\n")
+			sb.WriteString(line)
+			sb.WriteString("\n")
 		}
 	}
 

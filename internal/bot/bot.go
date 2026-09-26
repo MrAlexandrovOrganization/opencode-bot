@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math/rand"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -1030,7 +1031,8 @@ func (b *Bot) previewText() string {
 	case st.partial != "":
 		sb.WriteString(st.partial)
 	case st.reasoning != "":
-		sb.WriteString("🧠 " + shortLine(st.reasoning, 200))
+		sb.WriteString("🧠 ")
+		sb.WriteString(shortLine(st.reasoning, 200))
 	}
 	return sb.String()
 }
@@ -1392,13 +1394,17 @@ func splitHTMLChunks(s string, n int) []string {
 	var open []string // стек имён открытых тегов
 
 	closeOpen := func() {
-		for i := len(open) - 1; i >= 0; i-- {
-			buf.WriteString("</" + open[i] + ">")
+		for _, o := range slices.Backward(open) {
+			buf.WriteString("</")
+			buf.WriteString(o)
+			buf.WriteString(">")
 		}
 	}
 	reopenOpen := func() {
 		for _, t := range open {
-			buf.WriteString("<" + t + ">")
+			buf.WriteString("<")
+			buf.WriteString(t)
+			buf.WriteString(">")
 		}
 	}
 	flush := func() {
