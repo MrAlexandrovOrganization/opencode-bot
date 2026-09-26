@@ -46,6 +46,7 @@ permissions, вопросы, загрузка файлов) идёт через 
 в этом стеке и общий для шлюза и бота.
 
 Запуск: `make up` (сборка + старт opencode-server и opencode-bot),
+`make dev` (пересборка и рестарт только opencode-bot — быстрый цикл),
 `make server` (только opencode-server). Шлюз поднимается отдельно в его репозитории.
 
 ### Выборочный VPN на VM
@@ -146,7 +147,8 @@ agents/                      — документы для дальнейшей 
 
 ## Команды
 
-- `make up` / `make down` / `make logs` / `make restart` / `make deploy` — docker compose
+- `make up` / `make down` / `make logs` / `make restart` — docker compose
+- `make dev` — пересборка и рестарт только opencode-bot (сервер не трогается)
 - `make server` — пересборка и старт только opencode-server
 - `make test` — юнит-тесты Go-пакетов
 - `make fmt-check` — проверка форматирования без изменения файлов
@@ -158,6 +160,14 @@ agents/                      — документы для дальнейшей 
   и регенерация стабов (`make install` для плагинов + protoc)
 
 **Перед сдачей изменений:** `make lint` и `make test`.
+
+Сборка: версии protoc-плагинов заданы один раз в `Makefile`
+(`PROTOC_GEN_GO_VERSION`, `PROTOC_GEN_GRPC_VERSION`) и передаются в оба
+Dockerfile как build args, поэтому `docker compose build` нужно запускать через
+make-таргеты — без переменных compose падает с понятной ошибкой. В Dockerfile
+используются BuildKit cache mounts для `/go/pkg/mod` и `/root/.cache/go-build`:
+кэш принадлежит билдеру, поэтому один и тот же Dockerfile одинаково работает на
+Linux и на Docker Desktop (macOS), просто на новой машине он первый раз холодный.
 
 Размер входящих Telegram-файлов ограничен 100 МиБ до конвертации и загрузки в
 шлюз. Стандартный Compose монтирует SSH deploy-ключ в контейнер сервера, если

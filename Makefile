@@ -13,16 +13,31 @@ GO_UNIT_PKGS = \
 #   make proto WHISPER_PROTO_SRC=https://raw.githubusercontent.com/org/transcriber/main/proto/whisper.proto
 WHISPER_PROTO_SRC ?= ../../backends/transcriber/proto/whisper.proto
 
+# Single source of truth for the protoc plugins. Exported so that both
+# Dockerfiles receive them as build args (see docker-compose.yml); change
+# them here only. `docker compose build` outside make fails on purpose —
+# use the make targets.
+PROTOC_GEN_GO_VERSION ?= v1.36.11
+PROTOC_GEN_GRPC_VERSION ?= v1.6.1
+export PROTOC_GEN_GO_VERSION
+export PROTOC_GEN_GRPC_VERSION
+
 # Install all dev tools: Go protoc plugins.
 # Requires protoc on PATH (e.g. apt install protobuf-compiler).
 .PHONY: install
 install:
-	go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
-	go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.1
+	go install google.golang.org/protobuf/cmd/protoc-gen-go@$(PROTOC_GEN_GO_VERSION)
+	go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@$(PROTOC_GEN_GRPC_VERSION)
 
+# Build and (re)start everything, including the heavy opencode-server image.
 .PHONY: up
 up:
 	$(DOCKER_COMPOSE) up -d --build
+
+# Fast loop for bot-only changes: never touches opencode-server.
+.PHONY: dev
+dev:
+	$(DOCKER_COMPOSE) up -d --build --no-deps opencode-bot
 
 .PHONY: down
 down:
@@ -35,10 +50,6 @@ logs:
 .PHONY: restart
 restart:
 	$(DOCKER_COMPOSE) restart
-
-.PHONY: deploy
-deploy:
-	$(DOCKER_COMPOSE) up -d --build --no-cache
 
 .PHONY: format
 format:

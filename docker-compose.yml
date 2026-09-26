@@ -3,6 +3,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.server
+      args:
+        # Provided by the Makefile (exported env); see PROTOC_GEN_* in Makefile.
+        PROTOC_GEN_GO_VERSION: ${PROTOC_GEN_GO_VERSION:?PROTOC_GEN_GO_VERSION is unset - build via make, which pins protoc plugin versions}
+        PROTOC_GEN_GRPC_VERSION: ${PROTOC_GEN_GRPC_VERSION:?PROTOC_GEN_GRPC_VERSION is unset - build via make, which pins protoc plugin versions}
     restart: unless-stopped
     environment:
       # Protect the server with HTTP basic auth. The bot sends the same
@@ -58,7 +62,12 @@ services:
   # opencode-backend (порт 8080) — бот ходит в него через BACKEND_BASE_URL.
 
   opencode-bot:
-    build: .
+    build:
+      context: .
+      args:
+        # Provided by the Makefile (exported env); see PROTOC_GEN_* in Makefile.
+        PROTOC_GEN_GO_VERSION: ${PROTOC_GEN_GO_VERSION:?PROTOC_GEN_GO_VERSION is unset - build via make, which pins protoc plugin versions}
+        PROTOC_GEN_GRPC_VERSION: ${PROTOC_GEN_GRPC_VERSION:?PROTOC_GEN_GRPC_VERSION is unset - build via make, which pins protoc plugin versions}
     restart: unless-stopped
     env_file: .env
     environment:
