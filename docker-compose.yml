@@ -39,6 +39,8 @@ services:
       # (без парольной фразы, даёт write-доступ к нужным репозиториям).
       # Путь внутри контейнера задаётся в GIT_DEPLOY_KEY_PATH (см. .env).
       - ${HOME}/.ssh/github:/run/secrets/git_deploy_id_ed25519:ro
+    ports:
+      - "127.0.0.1:4096:4096"
     networks:
       - whisper-net
     extends:
