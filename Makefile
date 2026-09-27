@@ -97,3 +97,7 @@ proto:
 .PHONY: server
 server:
 	$(DOCKER_COMPOSE) up -d --build opencode-server
+
+.PHONY: config-check
+config-check:
+	$(DOCKER_COMPOSE) --env-file /dev/null config --quiet --no-env-resolution

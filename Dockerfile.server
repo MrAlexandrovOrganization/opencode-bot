@@ -84,7 +84,10 @@ COPY scripts/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 # Persisted opencode state lives in these XDG dirs (bind-mounted from the host
-# in docker-compose.yml). /workspace is the project root the agent operates on.
+# in docker-compose.yml). /home/maxim/projects is the server working directory:
+# sessions created without an explicit directory (bot/gateway) inherit it, and
+# it is the rw path where the agent edits files. /workspace is the same host
+# directory under the path opencode-backend uses for file:// uploads.
 ENV OPENCODE_DISABLE_AUTOUPDATE=1 \
     XDG_CONFIG_HOME=/mnt/config \
     XDG_DATA_HOME=/mnt/data \
@@ -102,7 +105,7 @@ ENV GOPATH=/home/ubuntu/go \
 # Run as the image's default `ubuntu` user (UID 1000), matching the host user
 # (maxim) so bind-mounted host files keep their original ownership.
 USER ubuntu
-WORKDIR /workspace
+WORKDIR /home/maxim/projects
 
 EXPOSE 4096
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

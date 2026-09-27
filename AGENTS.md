@@ -23,8 +23,13 @@ permissions, вопросы, загрузка файлов) идёт через 
 - **`opencode-server`** (`Dockerfile.server`) — сам opencode-сервер, бинарник из
   GitHub Releases (`anomalyco/opencode`), слушает порт `4096`. Mounts:
   - `/home/maxim:/home/maxim:ro` — домашняя директория только для чтения;
-  - `/home/maxim/projects:/workspace` — перекрывающий rw-маунт, единственное
-    место, где агент может править файлы;
+  - `/home/maxim/projects:/home/maxim/projects` — rw-маунт каталога проектов.
+    Он же рабочий каталог сервера (`WORKDIR`), поэтому сессии без явного
+    `directory` (их создают бот и шлюз) получают этот rw-путь, а агент может
+    править файлы;
+  - `/home/maxim/projects:/workspace` — тот же каталог под путём шлюза:
+    `opencode-backend` складывает туда вложения и отдаёт `file:///workspace/…`,
+    старые сессии в БД тоже хранят `directory=/workspace`;
   - XDG-директории opencode (`~/.config`, `~/.local/share`, `~/.cache`) — общее
     состояние, конфиги, провайдеры, БД.
   - Служит под `ubuntu` (UID 1000), git-identity задаётся из env через

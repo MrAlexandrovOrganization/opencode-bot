@@ -29,8 +29,13 @@ services:
       # Read-only access to the whole home directory ("читай почти всё").
       - ${HOME}:/home/maxim:ro
       # Writable project root — the only place the agent may edit files.
-      # Overrides the read-only /home/maxim mount for this subtree.
+      # Mounted at its own path, so it does NOT lift the ro mount above.
       - ${HOME}/projects:/workspace
+      # Same writable subtree under the host path: web-UI sessions are created
+      # with directory=/home/maxim/projects and would otherwise land on the
+      # read-only mount above (EROFS for every agent write).
+      # Must stay AFTER the ro home mount — later mounts win.
+      - ${HOME}/projects:/home/maxim/projects
       # Reuse the host opencode state (config, plugins, DB, provider auth).
       - ${HOME}/.config/opencode:/mnt/config
       - ${HOME}/.local/share/opencode:/mnt/data
