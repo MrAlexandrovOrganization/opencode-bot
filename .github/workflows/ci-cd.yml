@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   test:
     name: Lint & Test
@@ -19,25 +23,78 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.26.6"
+          go-version-file: go.mod
 
       - name: Check
         run: make check
 
-  deploy:
-    name: Deploy to VM
-    needs: test
-    runs-on: ubuntu-24.04
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
 
+  images:
+    name: Build and publish application images
+    needs: [test]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      manifest: ${{ steps.publish.outputs.manifest }}
+    env:
+      IMAGE_REPOSITORY: ghcr.io/${{ github.repository }}
     steps:
-      - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1
+      - uses: actions/checkout@v4
+      - name: Build images without runtime secrets
+        run: make image-check image-build
+      - name: Log in to GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish the images built above
+        id: publish
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: make image-publish
+      - name: Save digest manifest
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-release
+          path: .images/release.json
+          include-hidden-files: true
+          retention-days: 30
+
+  deploy:
+    name: Deploy published digests to VM
+    needs: images
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      packages: read
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    steps:
+      - name: Deploy checked revision and published images
+        uses: appleboy/ssh-action@v1.2.2
+        env:
+          PROJECT_PATH: ${{ secrets.VM_PROJECT_PATH }}
+          DEPLOY_SHA: ${{ github.sha }}
+          IMAGE_MANIFEST_B64: ${{ needs.images.outputs.manifest }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           host: ${{ secrets.VM_HOST }}
           username: ${{ secrets.VM_USER }}
           key: ${{ secrets.VM_SSH_KEY }}
+          envs: PROJECT_PATH,DEPLOY_SHA,IMAGE_MANIFEST_B64,GHCR_USER,GHCR_TOKEN
+          command_timeout: 35m
           script: |
-            cd ${{ secrets.VM_PROJECT_PATH }}
-            git pull
-            make up
+            set -eu
+            cd "${PROJECT_PATH:?}"
+            test "$(git rev-parse --show-toplevel)" = "$(pwd -P)"
+            git fetch --quiet origin refs/heads/main
+            git show "$DEPLOY_SHA:makefiles/ci-deploy.mk" | make -f - ci-deploy

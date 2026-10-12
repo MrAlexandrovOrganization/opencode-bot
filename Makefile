@@ -13,14 +13,8 @@ GO_UNIT_PKGS = \
 #   make proto WHISPER_PROTO_SRC=https://raw.githubusercontent.com/org/transcriber/main/proto/whisper.proto
 WHISPER_PROTO_SRC ?= ../../backends/transcriber/proto/whisper.proto
 
-# Single source of truth for the protoc plugins. Exported so that both
-# Dockerfiles receive them as build args (see docker-compose.yml); change
-# them here only. `docker compose build` outside make fails on purpose —
-# use the make targets.
-PROTOC_GEN_GO_VERSION ?= v1.36.11
-PROTOC_GEN_GRPC_VERSION ?= v1.6.1
-export PROTOC_GEN_GO_VERSION
-export PROTOC_GEN_GRPC_VERSION
+# Export canonical versions to both Dockerfiles through Compose.
+include versions.mk
 
 # Install all dev tools: Go protoc plugins.
 # Requires protoc on PATH (e.g. apt install protobuf-compiler).
@@ -98,6 +92,35 @@ proto:
 server:
 	$(DOCKER_COMPOSE) up -d --build opencode-server
 
+.PHONY: versions compose-build
+versions:
+	@$(foreach v,$(VERSION_VARS),printf '%s=%s\n' '$(v)' '$($(v))';)
+compose-build:
+	$(DOCKER_COMPOSE) build
+
 .PHONY: config-check
 config-check:
 	$(DOCKER_COMPOSE) --env-file /dev/null config --quiet --no-env-resolution
+
+# CI builds/publishes once; VM activates immutable digests (Python 3 + Docker required).
+export IMAGE_COMPOSE_FILE := docker-compose.yml
+.PHONY: image-build image-publish image-deploy image-activate
+image-build:
+	python3 scripts/images.py build
+image-publish:
+	python3 scripts/images.py publish
+image-deploy:
+	python3 scripts/images.py deploy
+image-activate:
+	$(IMAGE_COMPOSE) up -d --no-build --pull never --wait --wait-timeout 180
+
+.PHONY: image-check
+image-check:
+	python3 -B scripts/test_images.py
+
+.PHONY: image-compose
+export IMAGE_ARGS
+image-compose:
+	python3 scripts/images.py compose
+
+include makefiles/ci-deploy.mk

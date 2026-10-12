@@ -4,6 +4,16 @@ services:
       context: .
       dockerfile: Dockerfile.server
       args:
+        GO_VERSION: ${GO_VERSION:?Run via make}
+        UBUNTU_VERSION: ${UBUNTU_VERSION:?Run via make}
+        OPENCODE_VERSION: ${OPENCODE_VERSION:?Run via make}
+        BUF_VERSION: ${BUF_VERSION:?Run via make}
+        TEMPL_VERSION: ${TEMPL_VERSION:?Run via make}
+        GOOSE_VERSION: ${GOOSE_VERSION:?Run via make}
+        GOLANGCI_LINT_VERSION: ${GOLANGCI_LINT_VERSION:?Run via make}
+        GRPCURL_VERSION: ${GRPCURL_VERSION:?Run via make}
+        POETRY_VERSION: ${POETRY_VERSION:?Run via make}
+        WEB_FORAGER_VERSION: ${WEB_FORAGER_VERSION:?Run via make}
         # Provided by the Makefile (exported env); see PROTOC_GEN_* in Makefile.
         PROTOC_GEN_GO_VERSION: ${PROTOC_GEN_GO_VERSION:?PROTOC_GEN_GO_VERSION is unset - build via make, which pins protoc plugin versions}
         PROTOC_GEN_GRPC_VERSION: ${PROTOC_GEN_GRPC_VERSION:?PROTOC_GEN_GRPC_VERSION is unset - build via make, which pins protoc plugin versions}
@@ -47,7 +57,9 @@ services:
     ports:
       - "127.0.0.1:4096:4096"
     networks:
-      - whisper-net
+      whisper-net: {}
+      caddy-opencode-net:
+        aliases: [opencode-ingress]
     extends:
       file: docker-compose.base.yml
       service: base
@@ -72,6 +84,8 @@ services:
     build:
       context: .
       args:
+        GO_VERSION: ${GO_VERSION:?Run via make}
+        ALPINE_VERSION: ${ALPINE_VERSION:?Run via make}
         # Provided by the Makefile (exported env); see PROTOC_GEN_* in Makefile.
         PROTOC_GEN_GO_VERSION: ${PROTOC_GEN_GO_VERSION:?PROTOC_GEN_GO_VERSION is unset - build via make, which pins protoc plugin versions}
         PROTOC_GEN_GRPC_VERSION: ${PROTOC_GEN_GRPC_VERSION:?PROTOC_GEN_GRPC_VERSION is unset - build via make, which pins protoc plugin versions}
@@ -107,6 +121,9 @@ services:
       service: base
 
 networks:
+  caddy-opencode-net:
+    external: true
+    name: caddy-opencode-net
   telegram-net:
     external: true
   whisper-net:

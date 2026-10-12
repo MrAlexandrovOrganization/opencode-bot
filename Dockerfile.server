@@ -1,15 +1,22 @@
 # syntax=docker/dockerfile:1
+# check=skip=InvalidDefaultArgInFrom
 
 # opencode server — standalone opencode binary from GitHub Releases.
 # There is no official public image, so we download the release build.
-ARG GO_VERSION=1.26.6
-ARG OPENCODE_VERSION=v1.18.29
+ARG GO_VERSION
+ARG OPENCODE_VERSION
+ARG UBUNTU_VERSION
 
 FROM golang:${GO_VERSION}-alpine AS tools
 
-# Pinned via build args from the Makefile (single source of truth).
+# Required versions are supplied by Make/Compose, without fallback pins.
 ARG PROTOC_GEN_GO_VERSION
 ARG PROTOC_GEN_GRPC_VERSION
+ARG BUF_VERSION
+ARG TEMPL_VERSION
+ARG GOOSE_VERSION
+ARG GOLANGCI_LINT_VERSION
+ARG GRPCURL_VERSION
 
 RUN apk add --no-cache ca-certificates git
 
@@ -18,15 +25,15 @@ ENV CGO_ENABLED=0
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     set -eux; \
-    GOBIN=/out go install github.com/bufbuild/buf/cmd/buf@v1.67.0; \
+    GOBIN=/out go install github.com/bufbuild/buf/cmd/buf@${BUF_VERSION}; \
     GOBIN=/out go install google.golang.org/protobuf/cmd/protoc-gen-go@${PROTOC_GEN_GO_VERSION}; \
     GOBIN=/out go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@${PROTOC_GEN_GRPC_VERSION}; \
-    GOBIN=/out go install github.com/a-h/templ/cmd/templ@v0.3.1020; \
-    GOBIN=/out go install github.com/pressly/goose/v3/cmd/goose@v3.19.2; \
-    GOBIN=/out go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.1; \
-    GOBIN=/out go install github.com/fullstorydev/grpcurl/cmd/grpcurl@v1.9.1
+    GOBIN=/out go install github.com/a-h/templ/cmd/templ@${TEMPL_VERSION}; \
+    GOBIN=/out go install github.com/pressly/goose/v3/cmd/goose@${GOOSE_VERSION}; \
+    GOBIN=/out go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${GOLANGCI_LINT_VERSION}; \
+    GOBIN=/out go install github.com/fullstorydev/grpcurl/cmd/grpcurl@${GRPCURL_VERSION}
 
-FROM ubuntu:24.04 AS download
+FROM ubuntu:${UBUNTU_VERSION} AS download
 
 ARG TARGETARCH
 ARG OPENCODE_TARGET
@@ -48,10 +55,12 @@ RUN case "${TARGETARCH}" in \
     && chmod +x /usr/local/bin/opencode \
     && /usr/local/bin/opencode --version
 
-FROM ubuntu:24.04
+FROM ubuntu:${UBUNTU_VERSION}
 
 ARG TARGETARCH
-ARG GO_VERSION=1.26.6
+ARG GO_VERSION
+ARG POETRY_VERSION
+ARG WEB_FORAGER_VERSION
 
 # Dev toolchain: make/gcc (build-essential), Python 3 + pip + poetry, jq for
 # JSON, envsubst for the observability Makefiles, git+curl.
@@ -66,7 +75,7 @@ RUN apt-get update \
     # --break-system-packages installs poetry to /usr/local/bin for everyone.
     # web-forager = local DuckDuckGo MCP server for the agent's web search
     # (keyless alternative to the built-in Exa websearch tool).
-    && pip3 install --no-cache-dir --break-system-packages poetry web-forager==3.0.1
+    && pip3 install --no-cache-dir --break-system-packages poetry==${POETRY_VERSION} web-forager==${WEB_FORAGER_VERSION}
 
 # Go toolchain. apt's golang-go on 24.04 is Go 1.22 — too old for the projects
 # here (notes-bot, ollama-bot, location need go >= 1.26), so install the

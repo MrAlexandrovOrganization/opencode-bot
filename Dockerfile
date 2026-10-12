@@ -1,8 +1,11 @@
 # syntax=docker/dockerfile:1
+# check=skip=InvalidDefaultArgInFrom
 
-FROM golang:1.26.6-alpine AS builder
+ARG GO_VERSION
+ARG ALPINE_VERSION
+FROM golang:${GO_VERSION}-alpine AS builder
 
-# Pinned via build args from the Makefile (single source of truth).
+# Required versions are supplied by Make/Compose, without fallback pins.
 ARG PROTOC_GEN_GO_VERSION
 ARG PROTOC_GEN_GRPC_VERSION
 
@@ -37,7 +40,7 @@ RUN --mount=type=cache,id=opencode-bot-go-mod,target=/go/pkg/mod \
     --mount=type=cache,id=opencode-bot-go-build,target=/root/.cache/go-build \
     CGO_ENABLED=0 go build -ldflags="-s -w" -trimpath -o /bot ./cmd/bot
 
-FROM alpine:3.21
+FROM alpine:${ALPINE_VERSION}
 RUN apk add --no-cache ca-certificates tzdata ffmpeg
 COPY --from=builder /bot /bot
 CMD ["/bot"]

@@ -67,6 +67,14 @@ permissions, вопросы, загрузка файлов) идёт через 
 `docker compose -f docker-compose.yml ...`. Не заменять незакоммиченные
 серверные правки основного Compose при применении VPN.
 
+### HTTPS ingress
+
+`opencode-server` подключён к отдельной внутренней external-сети
+`caddy-opencode-net` с alias `opencode-ingress`. Сеть создаёт Compose
+`infra/network/caddy` до запуска приложений. Не использовать сети наблюдаемости
+для маршрутизации HTTP к серверу. `make config-check` выполняет read-only
+валидацию Compose с версиями из Make и без загрузки `.env`.
+
 ## Структура репозитория
 
 ```
@@ -194,8 +202,8 @@ agents/                      — документы для дальнейшей 
 
 **Перед сдачей изменений:** `make lint` и `make test`.
 
-Сборка: версии protoc-плагинов заданы один раз в `Makefile`
-(`PROTOC_GEN_GO_VERSION`, `PROTOC_GEN_GRPC_VERSION`) и передаются в оба
+Сборка: версии инструментов и образов заданы один раз в `versions.mk`, Go — в `go.mod`
+(`PROTOC_GEN_GO_VERSION`, `PROTOC_GEN_GRPC_VERSION` и другие) и передаются в оба
 Dockerfile как build args, поэтому `docker compose build` нужно запускать через
 make-таргеты — без переменных compose падает с понятной ошибкой. В Dockerfile
 используются BuildKit cache mounts для `/go/pkg/mod` и `/root/.cache/go-build`:
