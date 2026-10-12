@@ -100,6 +100,13 @@ compose-build:
 
 .PHONY: config-check
 config-check:
+	@set -eu; \
+	created_env=0; \
+	if test ! -e .env && test ! -L .env; then \
+		(umask 077; set -C; : > .env) || { echo '.env appeared while preparing config check' >&2; exit 1; }; \
+		created_env=1; \
+	fi; \
+	trap 'if test "$$created_env" = 1; then rm -f .env; fi' EXIT; \
 	$(DOCKER_COMPOSE) --env-file /dev/null config --quiet --no-env-resolution
 
 # CI builds/publishes once; VM activates immutable digests (Python 3 + Docker required).
