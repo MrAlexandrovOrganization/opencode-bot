@@ -21,7 +21,7 @@ Go задаётся в `go.mod`, образы и инструменты конт
 - `make compose-build` — собрать оба образа.
 - `make up` — собрать и запустить стек.
 - `make dev` — пересобрать и перезапустить только бота.
-- `make check` — локальные проверки.
+- `make check` — форматирование, vet, тесты и валидация Compose-конфигурации.
 
 Make экспортирует версии в Compose и Dockerfile. Для изменения релиза
 opencode-server редактируйте `OPENCODE_VERSION` в `versions.mk`.

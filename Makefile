@@ -61,7 +61,7 @@ lint:
 test:
 	go test $(GO_UNIT_PKGS)
 
-check: fmt-check lint test
+check: fmt-check lint test config-check
 
 .PHONY: cover
 cover:
