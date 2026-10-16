@@ -1,6 +1,7 @@
 # Selective VLESS egress; provision infra/network/vless-client on the VM first.
 services:
   opencode-server:
+    container_name: "${CONTAINER_NAME_PREFIX:-}opencode-server"
     dns:
       - 10.245.77.1
     networks:

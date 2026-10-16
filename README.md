@@ -89,3 +89,10 @@ VM нужны Python 3.9+, Make, Docker Compose с `--wait`, Git и flock для
 обходные Compose-операции одновременно с доставкой. При первом переходе на GHCR
 `previous.json` ещё отсутствует: сохраните прежние локальные образы и конфигурацию
 для восстановления по runbook до первого релиза.
+
+## Container names
+
+Compose uses explicit service names without replica numbers. Set
+`CONTAINER_NAME_PREFIX` (for example `dev-`) for an additional local or CI stack
+on the same Docker host. Keep Compose project/service labels and volume names
+unchanged; clients address services or explicit network aliases.
