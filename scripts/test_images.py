@@ -35,6 +35,18 @@ class DeliveryTests(unittest.TestCase):
             os.environ, {"IMAGE_COMPOSE_FILE": "compose.yaml"}, clear=True
         ).start()
 
+    def test_operate_uses_active_image_after_configuration_commit(self):
+        images.STATE.mkdir()
+        (images.STATE / "current.json").write_text(json.dumps(self.manifest))
+        with (
+            patch.object(images, "revision", return_value="c" * 40),
+            patch.object(images, "compose", return_value=["docker", "compose"]),
+            patch.object(images, "run") as run,
+        ):
+            images.operate()
+        self.assertIn(str(images.STATE / "compose.json"), run.call_args.args)
+        self.assertEqual(run.call_args.args[-1], "ps")
+
     def save_manifest(self):
         path = self.root / "manifest.json"
         path.write_text(json.dumps(self.manifest))

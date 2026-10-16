@@ -175,8 +175,10 @@ def publish():
             output.write(f"manifest={encoded}\n")
 
 
-def validate(manifest):
-    if manifest["revision"] != revision() or manifest["platform"] != PLATFORM:
+def validate(manifest, *, require_revision=True):
+    if (require_revision and manifest["revision"] != revision()) or manifest[
+        "platform"
+    ] != PLATFORM:
         raise ValueError("Release revision/platform differs from checkout")
     expected = set(specs())
     expected.update(
@@ -256,7 +258,7 @@ def deploy():
 def operate():
     """Use the active release for diagnostics and explicit one-shot commands."""
     manifest = json.loads((STATE / "current.json").read_text())
-    validate(manifest)
+    validate(manifest, require_revision=False)
     args = shlex.split(os.environ.get("IMAGE_ARGS", "ps"))
     if not args or args[0] not in {"ps", "logs", "exec", "run", "stop", "restart"}:
         raise ValueError(
